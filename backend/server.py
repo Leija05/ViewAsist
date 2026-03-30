@@ -1143,24 +1143,91 @@ async def get_clock_device_info(request: Request):
 @api_router.get("/clock/users")
 async def get_clock_users(request: Request):
     await get_current_user(request)
-    users = await db.clock_users.find({}).sort("user_id", 1).to_list(2000)
-    return [_serialize_clock_user(u) for u in users]
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = _connect_to_clock(config)
+    users_payload: List[Dict[str, Any]] = []
+    try:
+        users = conn.get_users() or []
+        now = datetime.now(timezone.utc)
+        for user in users:
+            user_id = str(getattr(user, "user_id", "")).strip()
+            if not user_id:
+                continue
+            privilege = "admin" if int(getattr(user, "privilege", 0) or 0) > 0 else "empleado"
+            user_doc = {
+                "user_id": user_id,
+                "name": getattr(user, "name", f"Empleado {user_id}") or f"Empleado {user_id}",
+                "department": "General",
+                "privilege": privilege,
+                "password": getattr(user, "password", "") or "",
+                "card_number": str(getattr(user, "card", "") or ""),
+                "fingerprint_registered": True,
+                "face_registered": False,
+                "vein_registered": False,
+                "work_schedule": "Turno General",
+                "enabled": True,
+                "sync_status": "synced",
+                "updated_at": now,
+            }
+            await db.clock_users.update_one(
+                {"user_id": user_id},
+                {"$set": user_doc, "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
+            users_payload.append(user_doc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudieron leer usuarios del reloj: {exc}")
+    finally:
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
+    users_payload.sort(key=lambda item: item["user_id"])
+    return {"users": users_payload, "count": len(users_payload)}
 
 
 @api_router.post("/clock/users")
 async def create_clock_user(payload: ClockUserBase, request: Request):
     await get_current_user(request)
-    exists = await db.clock_users.find_one({"user_id": payload.user_id})
-    if exists:
-        raise HTTPException(status_code=409, detail="Ya existe un usuario con ese ID")
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = _connect_to_clock(config)
+    try:
+        privilege = 14 if payload.privilege == "admin" else 0
+        conn.set_user(
+            uid=int(payload.user_id),
+            name=payload.name,
+            privilege=privilege,
+            password=payload.password,
+            user_id=payload.user_id,
+            card=payload.card_number,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="El user_id del reloj debe ser numérico")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo registrar el usuario en el reloj: {exc}")
+    finally:
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
+    now = datetime.now(timezone.utc)
     doc = payload.model_dump()
-    doc.update({
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
-        "sync_status": "pending",
-    })
-    result = await db.clock_users.insert_one(doc)
-    saved = await db.clock_users.find_one({"_id": result.inserted_id})
+    doc.update({"sync_status": "synced", "updated_at": now})
+    await db.clock_users.update_one(
+        {"user_id": payload.user_id},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    saved = await db.clock_users.find_one({"user_id": payload.user_id})
     return _serialize_clock_user(saved)
 
 
@@ -1309,29 +1376,64 @@ async def sync_clock_attendance(request: Request):
     settings = await db.settings.find_one({}, {"_id": 0}) or {"entry_time": "09:00", "tolerance_minutes": 30, "work_hours": 9}
     data = _fetch_clock_attendance(config)
 
+    now = datetime.now(timezone.utc)
+    raw_operations = []
+    for record in data["records"]:
+        employee_id = str(record.get("employee_id", "")).strip()
+        timestamp = record.get("timestamp")
+        if not employee_id or not isinstance(timestamp, datetime):
+            continue
+        ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        raw_operations.append(
+            {
+                "employee_id": employee_id,
+                "timestamp": ts,
+                "source": "clock_sync",
+                "device_name": config.get("device_name", "Reloj Principal"),
+                "ip": config.get("ip"),
+                "port": config.get("port"),
+                "synced_at": now,
+            }
+        )
+
+    if raw_operations:
+        await db.attendance_records.insert_many(raw_operations)
+
     await db.clock_events.insert_one({
         "source": "clock_device",
         "device": {"ip": config.get("ip"), "port": config.get("port"), "device_name": config.get("device_name")},
         "events": data["records"],
-        "created_at": datetime.now(timezone.utc),
+        "created_at": now,
     })
 
     summary = _summarize_clock_records(data["records"], settings, data.get("users"))
+    normalized_daily_records = [AttendanceRecord(**record).model_dump() for record in summary["attendance_records"]]
+    if normalized_daily_records:
+        await db.attendance_records.insert_many([
+            {
+                **record,
+                "source": "clock_summary",
+                "synced_at": now,
+                "device_name": config.get("device_name", "Reloj Principal"),
+            }
+            for record in normalized_daily_records
+        ])
+
     report_doc = {
-        "filename": f"SYNC_RELOJ_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-        "upload_date": datetime.now(timezone.utc),
+        "filename": f"SYNC_RELOJ_{now.strftime('%Y%m%d_%H%M%S')}",
+        "upload_date": now,
         "source": "clock_sync",
         "sheets": ["Reloj checador"],
         "employees": summary["employees"],
-        "attendance_records": summary["attendance_records"],
+        "attendance_records": normalized_daily_records,
         "statistics": summary["statistics"],
     }
     report_result = await db.reports.insert_one(report_doc)
 
-    await db.clock_config.update_one({}, {"$set": {"last_sync": datetime.now(timezone.utc)}}, upsert=True)
+    await db.clock_config.update_one({}, {"$set": {"last_sync": now}}, upsert=True)
 
     return ClockSyncResponse(
-        synced_records=len(summary["attendance_records"]),
+        synced_records=len(raw_operations),
         generated_report_id=str(report_result.inserted_id),
         message="Sincronización completada desde el reloj checador",
     )
@@ -1454,6 +1556,8 @@ async def startup_event():
     await db.users.create_index("email", unique=True)
     await db.reports.create_index("upload_date")
     await db.clock_users.create_index("user_id", unique=True)
+    await db.attendance_records.create_index([("employee_id", 1), ("timestamp", 1)])
+    await db.attendance_records.create_index("synced_at")
     
     # Initialize settings if not exists
     settings = await db.settings.find_one({})
