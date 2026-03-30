@@ -1197,19 +1197,26 @@ async def create_clock_user(payload: ClockUserBase, request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
+    user_id_raw = str(payload.user_id or "").strip()
+    if not user_id_raw:
+        raise HTTPException(status_code=400, detail="El ID del usuario es obligatorio")
+
+    try:
+        device_uid = int(user_id_raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="El ID del usuario debe contener solo números (ejemplo: 123)")
+
     conn = _connect_to_clock(config)
     try:
         privilege = 14 if payload.privilege == "admin" else 0
         conn.set_user(
-            uid=int(payload.user_id),
+            uid=device_uid,
             name=payload.name,
             privilege=privilege,
             password=payload.password,
-            user_id=payload.user_id,
+            user_id=user_id_raw,
             card=payload.card_number,
         )
-    except ValueError:
-        raise HTTPException(status_code=400, detail="El user_id del reloj debe ser numérico")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"No se pudo registrar el usuario en el reloj: {exc}")
     finally:
@@ -1220,14 +1227,15 @@ async def create_clock_user(payload: ClockUserBase, request: Request):
 
     now = datetime.now(timezone.utc)
     doc = payload.model_dump()
+    doc["user_id"] = user_id_raw
     doc.update({"sync_status": "synced", "updated_at": now})
     await db.clock_users.update_one(
-        {"user_id": payload.user_id},
+        {"user_id": user_id_raw},
         {"$set": doc, "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
 
-    saved = await db.clock_users.find_one({"user_id": payload.user_id})
+    saved = await db.clock_users.find_one({"user_id": user_id_raw})
     return _serialize_clock_user(saved)
 
 
