@@ -30,26 +30,26 @@
 }
 
 .dark {
-  --background: 240 10% 6%;
-  --foreground: 0 0% 96%;
-  --card: 240 8% 10%;
-  --card-foreground: 0 0% 96%;
-  --popover: 240 8% 10%;
-  --popover-foreground: 0 0% 96%;
-  --primary: 0 0% 96%;
-  --primary-foreground: 0 0% 8%;
-  --secondary: 240 8% 16%;
-  --secondary-foreground: 0 0% 96%;
-  --muted: 240 8% 16%;
-  --muted-foreground: 240 5% 72%;
-  --accent: 240 8% 16%;
-  --accent-foreground: 0 0% 96%;
-  --destructive: 3 70% 50%;
+  --background: 220 12% 18%;
+  --foreground: 220 20% 94%;
+  --card: 220 12% 22%;
+  --card-foreground: 220 20% 94%;
+  --popover: 220 12% 22%;
+  --popover-foreground: 220 20% 94%;
+  --primary: 220 20% 94%;
+  --primary-foreground: 220 12% 18%;
+  --secondary: 220 10% 28%;
+  --secondary-foreground: 220 20% 94%;
+  --muted: 220 10% 26%;
+  --muted-foreground: 220 12% 78%;
+  --accent: 220 10% 28%;
+  --accent-foreground: 220 20% 94%;
+  --destructive: 3 74% 58%;
   --destructive-foreground: 0 0% 98%;
-  --warning: 48 96% 45%;
+  --warning: 48 90% 58%;
   --warning-foreground: 48 100% 10%;
-  --border: 240 8% 24%;
-  --input: 240 8% 24%;
+  --border: 220 10% 35%;
+  --input: 220 10% 35%;
   --ring: 0 0% 90%;
 }
 
@@ -151,9 +151,8 @@ code, pre, .mono {
   padding: 4px 8px;
   border: 1px solid hsl(var(--border));
   white-space: nowrap;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: none;
+  color: hsl(var(--foreground));
 }
 
 /* Loader */

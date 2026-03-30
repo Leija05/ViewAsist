@@ -74,7 +74,7 @@ const DashboardPage = () => {
   const [excelPreview, setExcelPreview] = useState(null);
   const [selectedSheet, setSelectedSheet] = useState(null);
   const [settings, setSettings] = useState({ entry_time: '09:00', tolerance_minutes: 30, work_hours: 9 });
-  const [clockConfig, setClockConfig] = useState({ device_name: 'Reloj Principal', ip: '192.168.1.104', port: 4370, password: '123', rules: [{ name: 'Turno General', expected_entry_time: '09:00', tolerance_minutes: 30 }] });
+  const [clockConfig, setClockConfig] = useState({ device_name: '', ip: '', port: 4370, password: '', rules: [{ name: 'Turno General', expected_entry_time: '09:00', tolerance_minutes: 30 }] });
   const [versionInfo, setVersionInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -86,6 +86,9 @@ const DashboardPage = () => {
   const [clockStatus, setClockStatus] = useState(null);
   const [clockUsers, setClockUsers] = useState([]);
   const [liveAttendance, setLiveAttendance] = useState([]);
+  const [clockLibraryMissing, setClockLibraryMissing] = useState(false);
+  const [clockReadOnly, setClockReadOnly] = useState(false);
+  const [clockNetwork, setClockNetwork] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
   const [clockUserDialogOpen, setClockUserDialogOpen] = useState(false);
   const [clockUserDialogMode, setClockUserDialogMode] = useState('create');
@@ -151,8 +154,32 @@ const DashboardPage = () => {
     try {
       const response = await axios.get(`${API_URL}/api/clock/status`, { withCredentials: true });
       setClockStatus(response.data);
+      setClockLibraryMissing(false);
+      setClockReadOnly(!response.data?.connected);
     } catch (error) {
       console.error('Error fetching clock status:', error);
+    }
+  }, []);
+
+  const getClockErrorMessage = (error, fallbackMessage) => {
+    const detail = error?.response?.data?.detail || '';
+    if (typeof detail === 'string' && detail.toLowerCase().includes('pyzk/zk')) {
+      setClockLibraryMissing(true);
+      setClockReadOnly(true);
+      return 'Falta la librería del reloj (pyzk). Instala en tu entorno Python: pip install pyzk';
+    }
+    if (typeof detail === 'string' && detail.toLowerCase().includes('autenticar')) {
+      setClockReadOnly(true);
+    }
+    return detail || fallbackMessage;
+  };
+
+  const fetchClockNetworkStatus = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/clock/network-check`, { withCredentials: true });
+      setClockNetwork(response.data);
+    } catch (error) {
+      setClockNetwork(null);
     }
   }, []);
 
@@ -185,12 +212,13 @@ const DashboardPage = () => {
         fetchClockStatus(),
         fetchClockUsers(),
         fetchLiveAttendance(),
-        fetchVersion()
+        fetchVersion(),
+        fetchClockNetworkStatus()
       ]);
       setLoading(false);
     };
     loadData();
-  }, [fetchDashboardData, fetchReports, fetchSettings, fetchClockConfig, fetchClockStatus, fetchClockUsers, fetchLiveAttendance, fetchVersion]);
+  }, [fetchDashboardData, fetchReports, fetchSettings, fetchClockConfig, fetchClockStatus, fetchClockUsers, fetchLiveAttendance, fetchVersion, fetchClockNetworkStatus]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -216,7 +244,7 @@ const DashboardPage = () => {
       toast.success('Archivo procesado correctamente');
       await fetchDashboardData();
       await fetchReports();
-      setSelectedReport(response.data.report_id);
+      await loadReportData(response.data.report_id);
       loadExcelPreview(response.data.report_id);
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Error al procesar archivo');
@@ -230,6 +258,7 @@ const DashboardPage = () => {
     try {
       const response = await axios.get(`${API_URL}/api/reports/${reportId}/excel-preview`, { withCredentials: true });
       setExcelPreview(response.data);
+      setSelectedReport(reportId);
       const sheetNames = Object.keys(response.data.sheets);
       if (sheetNames.length > 0) {
         setSelectedSheet(sheetNames[0]);
@@ -237,6 +266,23 @@ const DashboardPage = () => {
       setShowExcelPanel(true);
     } catch (error) {
       toast.error('Error al cargar vista previa del Excel');
+    }
+  };
+
+  const loadReportData = async (reportId) => {
+    try {
+      const response = await axios.get(`${API_URL}/api/reports/${reportId}`, { withCredentials: true });
+      const report = response.data;
+      setDashboardData({
+        has_data: true,
+        report_id: reportId,
+        statistics: report.statistics || {},
+        employees: report.employees || [],
+        alerts: []
+      });
+      setSelectedReport(reportId);
+    } catch (error) {
+      toast.error('No se pudo cargar el reporte seleccionado');
     }
   };
 
@@ -304,7 +350,7 @@ const DashboardPage = () => {
         toast.error(response.data.message || 'No se pudo conectar con el reloj');
       }
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Error validando conexión del reloj');
+      toast.error(getClockErrorMessage(error, 'Error validando conexión del reloj'));
     }
   };
 
@@ -316,12 +362,35 @@ const DashboardPage = () => {
       await fetchReports();
       await fetchClockConfig();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudo sincronizar con el reloj');
+      toast.error(getClockErrorMessage(error, 'No se pudo sincronizar con el reloj'));
     }
   };
 
   const handleToggleConnection = async (nextValue) => {
+    if (nextValue) {
+      if (!clockConfig.ip?.trim()) {
+        toast.error('Ingresa la IP del reloj antes de conectar');
+        return;
+      }
+      if (!clockConfig.port || Number(clockConfig.port) <= 0) {
+        toast.error('Ingresa un puerto válido');
+        return;
+      }
+      if (!String(clockConfig.password || '').trim()) {
+        toast.error('Ingresa la Contraseña/Comm Key antes de conectar');
+        return;
+      }
+    }
+
     try {
+      if (nextValue) {
+        await axios.put(`${API_URL}/api/clock/config`, {
+          ...clockConfig,
+          ip: clockConfig.ip.trim(),
+          password: String(clockConfig.password).trim(),
+          port: Number(clockConfig.port)
+        }, { withCredentials: true });
+      }
       await axios.post(`${API_URL}/api/clock/connection`, { connected: nextValue }, { withCredentials: true });
       toast.success(nextValue ? 'Reloj conectado' : 'Reloj desconectado');
       await fetchClockStatus();
@@ -411,7 +480,7 @@ const DashboardPage = () => {
       await fetchClockUsers();
       await fetchClockStatus();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudo importar usuarios del reloj');
+      toast.error(getClockErrorMessage(error, 'No se pudo importar usuarios del reloj'));
     }
   };
 
@@ -422,7 +491,7 @@ const DashboardPage = () => {
       toast.success(`Usuarios subidos: ${response.data.pushed}. Errores: ${errors}`);
       await fetchClockUsers();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudieron subir usuarios al reloj');
+      toast.error(getClockErrorMessage(error, 'No se pudieron subir usuarios al reloj'));
     }
   };
 
@@ -547,7 +616,7 @@ const DashboardPage = () => {
                   <Settings className="w-4 h-4" />
                 </Button>
               </DialogTrigger>
-              <DialogContent className="sm:max-w-md">
+              <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto">
                 <DialogHeader>
                   <DialogTitle className="text-xl font-bold">Configuración</DialogTitle>
                   <DialogDescription>
@@ -659,7 +728,7 @@ const DashboardPage = () => {
                         Probar Conexión
                       </Button>
                     </div>
-                    <Button className="w-full bg-black hover:bg-zinc-800" onClick={handleSyncFromClock}>
+                    <Button className="w-full bg-black hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300" onClick={handleSyncFromClock}>
                       Sincronizar Asistencias del Reloj
                     </Button>
                     {clockConfig.last_sync && (
@@ -704,7 +773,7 @@ const DashboardPage = () => {
                       </div>
                     )}
                   </div>
-                  <Button onClick={handleSaveSettings} data-testid="save-settings-button" className="w-full bg-black hover:bg-zinc-800">
+                  <Button onClick={handleSaveSettings} data-testid="save-settings-button" className="w-full bg-black hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
                     Guardar Configuración
                   </Button>
                 </div>
@@ -766,42 +835,52 @@ const DashboardPage = () => {
                 />
               </div>
 
-              <div className="border border-zinc-200 p-4 space-y-4">
+              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-widest">Centro de Reloj Checador</h3>
                   <Badge className={clockStatus?.connected ? 'bg-green-100 text-green-700' : 'bg-zinc-100 text-zinc-700'}>
                     {clockStatus?.connected ? 'Conectado' : 'Desconectado'}
                   </Badge>
                 </div>
+                {clockLibraryMissing && (
+                  <div className="p-3 text-sm border border-yellow-600/40 bg-yellow-500/10 text-yellow-200">
+                    Modo sin reloj físico: instala <code>pyzk</code> en el entorno del backend para habilitar prueba/sync/importación.
+                  </div>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-                  <div className="p-3 bg-zinc-50 border border-zinc-200">
+                  <div className="p-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
                     <p className="text-zinc-500">Dispositivo</p>
                     <p className="font-medium">{clockStatus?.device_name || 'Sin configurar'}</p>
                     <p className="text-zinc-500">{clockStatus?.ip}:{clockStatus?.port}</p>
                   </div>
-                  <div className="p-3 bg-zinc-50 border border-zinc-200">
+                  <div className="p-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
                     <p className="text-zinc-500">Usuarios en app</p>
                     <p className="font-medium">{clockStatus?.users_count || 0}</p>
                   </div>
-                  <div className="p-3 bg-zinc-50 border border-zinc-200">
+                  <div className="p-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
                     <p className="text-zinc-500">Última sincronización</p>
                     <p className="font-medium">{clockStatus?.last_sync ? new Date(clockStatus.last_sync).toLocaleString('es-MX') : 'Sin sync'}</p>
                   </div>
                 </div>
+                {clockNetwork && (
+                  <div className={`p-2 text-xs border ${clockNetwork.same_subnet ? 'border-green-600/40 bg-green-500/10 text-green-300' : 'border-yellow-600/40 bg-yellow-500/10 text-yellow-200'}`}>
+                    Red reloj: {clockNetwork.message} (Reloj: {clockNetwork.clock_ip || 'sin IP'} | Equipo: {clockNetwork.local_ips?.join(', ')})
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" className="border-2" onClick={openCreateClockUserDialog}>+ Agregar usuario</Button>
-                  <Button variant="outline" className="border-2" onClick={handlePullUsers}>Importar usuarios del reloj</Button>
-                  <Button variant="outline" className="border-2" onClick={handlePushUsers}>Subir usuarios al reloj (Wi-Fi)</Button>
-                  <Button variant="outline" className="border-2" onClick={handleSyncFromClock}>Descargar asistencias</Button>
-                  <Button variant="outline" className="border-2" onClick={fetchLiveAttendance}>Actualizar tiempo real</Button>
+                  <Button variant="outline" className="border-2" onClick={handlePullUsers} disabled={clockReadOnly}>Importar usuarios del reloj</Button>
+                  <Button variant="outline" className="border-2" onClick={handlePushUsers} disabled={clockReadOnly}>Subir usuarios al reloj (Wi-Fi)</Button>
+                  <Button variant="outline" className="border-2" onClick={handleSyncFromClock} disabled={clockReadOnly}>Descargar asistencias</Button>
+                  <Button variant="outline" className="border-2" onClick={fetchLiveAttendance} disabled={clockReadOnly}>Actualizar tiempo real</Button>
                 </div>
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                  <div className="border border-zinc-200">
-                    <div className="p-2 bg-zinc-50 border-b border-zinc-200 text-xs font-semibold uppercase tracking-widest">Usuarios del reloj</div>
+                  <div className="border border-zinc-200 dark:border-zinc-800">
+                    <div className="p-2 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-xs font-semibold uppercase tracking-widest">Usuarios del reloj</div>
                     <div className="max-h-64 overflow-auto">
                       <table className="w-full text-sm">
                         <thead>
-                          <tr className="border-b border-zinc-200">
+                          <tr className="border-b border-zinc-200 dark:border-zinc-800">
                             <th className="text-left p-2">ID</th>
                             <th className="text-left p-2">Nombre</th>
                             <th className="text-left p-2">Huella</th>
@@ -811,7 +890,7 @@ const DashboardPage = () => {
                         </thead>
                         <tbody>
                           {clockUsers.slice(0, 100).map((u) => (
-                            <tr key={u._id} className="border-b border-zinc-100">
+                            <tr key={u._id} className="border-b border-zinc-100 dark:border-zinc-900">
                               <td className="p-2 font-mono">{u.user_id}</td>
                               <td className="p-2">{u.name}</td>
                               <td className="p-2">{u.fingerprint_registered ? 'Sí' : 'No'}</td>
@@ -831,9 +910,9 @@ const DashboardPage = () => {
                       </table>
                     </div>
                   </div>
-                  <div className="border border-zinc-200">
-                    <div className="p-2 bg-zinc-50 border-b border-zinc-200 text-xs font-semibold uppercase tracking-widest">Asistencias en tiempo real</div>
-                    <div className="max-h-64 overflow-auto divide-y divide-zinc-100">
+                  <div className="border border-zinc-200 dark:border-zinc-800">
+                    <div className="p-2 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-xs font-semibold uppercase tracking-widest">Asistencias en tiempo real</div>
+                    <div className="max-h-64 overflow-auto divide-y divide-zinc-100 dark:divide-zinc-900">
                       {liveAttendance.slice(0, 50).map((event, idx) => (
                         <div key={`${event.employee_id}-${event.timestamp}-${idx}`} className="p-2 text-sm flex items-center justify-between">
                           <span className="font-mono">{event.employee_id}</span>
@@ -851,7 +930,7 @@ const DashboardPage = () => {
               {/* Charts */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* Bar Chart */}
-                <div className="border border-zinc-200 p-4">
+                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-widest mb-4">Faltas y Retardos por Empleado</h3>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
@@ -868,7 +947,7 @@ const DashboardPage = () => {
                 </div>
 
                 {/* Pie Chart */}
-                <div className="border border-zinc-200 p-4">
+                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-widest mb-4">Distribución General</h3>
                   <div className="h-64 flex items-center justify-center">
                     <ResponsiveContainer width="100%" height="100%">
@@ -903,7 +982,7 @@ const DashboardPage = () => {
 
               {/* Alerts */}
               {alerts.length > 0 && (
-                <div className="border border-zinc-200 p-4">
+                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-widest mb-4 flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 text-yellow-500" />
                     Alertas de Asistencia
@@ -931,15 +1010,15 @@ const DashboardPage = () => {
               )}
 
               {/* Employees Table */}
-              <div className="border border-zinc-200">
-                <div className="p-4 border-b border-zinc-200 flex items-center justify-between">
+              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
+                <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-widest">Resumen de Empleados</h3>
                   {dashboardData?.report_id && (
                     <div className="flex gap-2">
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => loadExcelPreview(dashboardData.report_id)}
+                        onClick={() => { loadReportData(dashboardData.report_id); loadExcelPreview(dashboardData.report_id); }}
                         data-testid="view-excel-button"
                         className="border-2"
                       >
@@ -961,7 +1040,7 @@ const DashboardPage = () => {
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full data-table">
-                    <thead className="bg-zinc-50 border-b border-zinc-200">
+                    <thead className="bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
                       <tr>
                         <th className="text-left p-3">ID</th>
                         <th className="text-left p-3">Nombre</th>
@@ -974,7 +1053,7 @@ const DashboardPage = () => {
                     </thead>
                     <tbody>
                       {employees.map((emp, idx) => (
-                        <tr key={idx} className="border-b border-zinc-100 hover:bg-zinc-50 transition-colors" data-testid={`employee-row-${idx}`}>
+                        <tr key={idx} className="border-b border-zinc-100 dark:border-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors" data-testid={`employee-row-${idx}`}>
                           <td className="p-3 font-mono text-sm">{emp.employee_id}</td>
                           <td className="p-3 font-medium">{emp.name}</td>
                           <td className="p-3 text-zinc-600">{emp.department}</td>
@@ -1007,13 +1086,13 @@ const DashboardPage = () => {
               </div>
 
               {/* Reports History */}
-              <div className="border border-zinc-200">
-                <div className="p-4 border-b border-zinc-200">
+              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
+                <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
                   <h3 className="text-sm font-semibold uppercase tracking-widest">Historial de Reportes</h3>
                 </div>
-                <div className="divide-y divide-zinc-100">
+                <div className="divide-y divide-zinc-100 dark:divide-zinc-900">
                   {reports.map((report) => (
-                    <div key={report._id} className="p-4 flex items-center justify-between hover:bg-zinc-50" data-testid={`report-${report._id}`}>
+                    <div key={report._id} className={`p-4 flex items-center justify-between hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selectedReport === report._id ? 'bg-zinc-100 dark:bg-zinc-900/70' : ''}`} data-testid={`report-${report._id}`}>
                       <div className="flex items-center gap-3">
                         <FileSpreadsheet className="w-5 h-5 text-zinc-400" />
                         <div>
@@ -1026,7 +1105,7 @@ const DashboardPage = () => {
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <Button variant="ghost" size="sm" onClick={() => loadExcelPreview(report._id)}>
+                        <Button variant="ghost" size="sm" onClick={() => { loadReportData(report._id); loadExcelPreview(report._id); }}>
                           <Eye className="w-4 h-4" />
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => handleExportPDF(report._id)}>
@@ -1070,8 +1149,8 @@ const DashboardPage = () => {
 
         {/* Excel Preview Panel */}
         {showExcelPanel && excelPreview && (
-          <aside className="lg:col-span-4 border-l border-zinc-200 bg-zinc-50 sticky top-16 h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-zinc-200 bg-white flex items-center justify-between">
+          <aside className="lg:col-span-4 border-l border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 sticky top-16 h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
+            <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 flex items-center justify-between">
               <div>
                 <h3 className="font-semibold text-sm">Vista Previa Excel</h3>
                 <p className="text-xs text-zinc-500 truncate">{excelPreview.filename}</p>
@@ -1082,7 +1161,7 @@ const DashboardPage = () => {
             </div>
 
             {/* Sheet Tabs */}
-            <div className="border-b border-zinc-200 bg-white">
+            <div className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
               <ScrollArea className="w-full" orientation="horizontal">
                 <div className="flex p-2 gap-1">
                   {Object.keys(excelPreview.sheets).map((sheetName) => (
@@ -1092,8 +1171,8 @@ const DashboardPage = () => {
                       data-testid={`sheet-tab-${sheetName}`}
                       className={`px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors ${
                         selectedSheet === sheetName
-                          ? 'bg-black text-white'
-                          : 'bg-zinc-100 hover:bg-zinc-200'
+                          ? 'bg-black text-white dark:bg-zinc-100 dark:text-zinc-900'
+                          : 'bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
                       }`}
                     >
                       {sheetName}
@@ -1105,12 +1184,12 @@ const DashboardPage = () => {
 
             {/* Sheet Content */}
             <ScrollArea className="flex-1">
-              <div className="p-2">
+              <div className="p-2 overflow-x-auto">
                 {selectedSheet && excelPreview.sheets[selectedSheet] && (
-                  <table className="excel-preview-table w-full">
+                  <table className="excel-preview-table w-max min-w-full">
                     <tbody>
-                      {excelPreview.sheets[selectedSheet].slice(0, 50).map((row, rowIdx) => (
-                        <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 font-semibold' : rowIdx % 2 === 0 ? 'bg-white' : 'bg-zinc-50'}>
+                      {excelPreview.sheets[selectedSheet].map((row, rowIdx) => (
+                        <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 dark:bg-zinc-800 font-semibold' : rowIdx % 2 === 0 ? 'bg-white dark:bg-zinc-950' : 'bg-zinc-50 dark:bg-zinc-900'}>
                           {row.map((cell, colIdx) => (
                             <td key={colIdx} title={cell}>
                               {cell}

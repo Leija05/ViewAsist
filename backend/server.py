@@ -13,6 +13,7 @@ import jwt
 import io
 import secrets
 import socket
+import ipaddress
 from pathlib import Path
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
@@ -564,7 +565,7 @@ async def get_excel_preview(report_id: str, request: Request):
         for sheet_name in workbook.sheet_names():
             sheet = workbook.sheet_by_name(sheet_name)
             sheet_data = []
-            for row_idx in range(min(100, sheet.nrows)):
+            for row_idx in range(sheet.nrows):
                 row_data = []
                 for col_idx in range(sheet.ncols):
                     cell_value = sheet.cell_value(row_idx, col_idx)
@@ -928,20 +929,46 @@ def _fetch_clock_attendance(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _connect_to_clock(config: Dict[str, Any]):
+    device_ip = str(config.get("ip", "") or "").strip()
+    if not device_ip:
+        raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
+
+    raw_port = config.get("port", 4370)
+    try:
+        device_port = int(raw_port)
+    except Exception:
+        raise HTTPException(status_code=400, detail="El puerto del reloj no es válido.")
+    if device_port <= 0:
+        raise HTTPException(status_code=400, detail="El puerto del reloj no es válido.")
+
+    raw_password = str(config.get("password", "") or "").strip()
+    if raw_password == "":
+        raise HTTPException(status_code=400, detail="Ingresa la Contraseña/Comm Key del reloj antes de conectar.")
+
     try:
         from zk import ZK  # type: ignore
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se encontró la librería pyzk/zk: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f'No se encontró la librería pyzk/zk: {exc}. Instala dependencias con: pip install pyzk'
+        )
 
-    device_ip = config["ip"]
-    device_port = int(config.get("port", 4370))
-    device_password = int(str(config.get("password", "0") or "0"))
+    try:
+        device_password = int(raw_password)
+    except Exception:
+        raise HTTPException(status_code=400, detail="La Contraseña/Comm Key debe ser numérica.")
 
     zk_client = ZK(device_ip, port=device_port, timeout=10, password=device_password, force_udp=False, ommit_ping=False)
     try:
         return zk_client.connect()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {exc}")
+        message = str(exc)
+        if "Unauthenticated" in message:
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo autenticar con el reloj. Verifica la Contraseña/Comm Key en Configuración."
+            )
+        raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {message}")
 
 
 def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -950,16 +977,37 @@ def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _same_subnet(local_ip: str, clock_ip: str, prefix: int = 24) -> bool:
+    try:
+        local_net = ipaddress.ip_network(f"{local_ip}/{prefix}", strict=False)
+        return ipaddress.ip_address(clock_ip) in local_net
+    except Exception:
+        return False
+
+
+def _get_local_ipv4s() -> List[str]:
+    ips = {"127.0.0.1"}
+    try:
+        hostname = socket.gethostname()
+        for result in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = result[4][0]
+            if ip:
+                ips.add(ip)
+    except Exception:
+        pass
+    return sorted(ips)
+
+
 @api_router.get("/clock/config")
 async def get_clock_config(request: Request):
     await get_current_user(request)
     config = await db.clock_config.find_one({}, {"_id": 0})
     if not config:
         config = {
-            "device_name": "Reloj Principal",
-            "ip": "192.168.1.104",
+            "device_name": "",
+            "ip": "",
             "port": 4370,
-            "password": "123",
+            "password": "",
             "rules": [
                 {"name": "Turno General", "expected_entry_time": "09:00", "tolerance_minutes": 30}
             ],
@@ -986,12 +1034,14 @@ async def test_clock_connection(request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
+    conn = _connect_to_clock(config)
     try:
-        with socket.create_connection((config["ip"], int(config.get("port", 4370))), timeout=5):
+        return {"connected": True, "message": "Conexión y autenticación con reloj exitosas"}
+    finally:
+        try:
+            conn.disconnect()
+        except Exception:
             pass
-        return {"connected": True, "message": "Conexión TCP establecida correctamente"}
-    except OSError as exc:
-        return {"connected": False, "message": f"No se pudo conectar por TCP: {exc}"}
 
 
 @api_router.post("/clock/connection")
@@ -1002,8 +1052,14 @@ async def set_clock_connection(payload: ClockConnectionPayload, request: Request
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
     if payload.connected:
-        with socket.create_connection((config["ip"], int(config.get("port", 4370))), timeout=5):
+        conn = _connect_to_clock(config)
+        try:
             pass
+        finally:
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
 
     await db.clock_config.update_one(
         {},
@@ -1027,6 +1083,21 @@ async def get_clock_status(request: Request):
         "users_count": users_count,
         "last_sync": config.get("last_sync"),
         "last_event_at": last_event.get("created_at") if last_event else None,
+    }
+
+
+@api_router.get("/clock/network-check")
+async def get_clock_network_check(request: Request):
+    await get_current_user(request)
+    config = await db.clock_config.find_one({}, {"_id": 0}) or {}
+    clock_ip = str(config.get("ip", "") or "").strip()
+    local_ips = _get_local_ipv4s()
+    same_subnet = any(_same_subnet(local_ip, clock_ip) for local_ip in local_ips if local_ip != "127.0.0.1") if clock_ip else False
+    return {
+        "clock_ip": clock_ip,
+        "local_ips": local_ips,
+        "same_subnet": same_subnet,
+        "message": "Equipo y reloj en misma red" if same_subnet else "Equipo y reloj parecen estar en redes distintas"
     }
 
 
@@ -1396,10 +1467,10 @@ async def startup_event():
     clock_config = await db.clock_config.find_one({})
     if not clock_config:
         await db.clock_config.insert_one({
-            "device_name": "Reloj Principal",
-            "ip": "192.168.1.104",
+            "device_name": "",
+            "ip": "",
             "port": 4370,
-            "password": "123",
+            "password": "",
             "rules": [
                 {"name": "Turno General", "expected_entry_time": "09:00", "tolerance_minutes": 30}
             ],
@@ -1407,6 +1478,21 @@ async def startup_event():
             "last_sync": None,
             "created_at": datetime.now(timezone.utc)
         })
+    else:
+        legacy_ip = str(clock_config.get("ip", "") or "").strip()
+        legacy_password = str(clock_config.get("password", "") or "").strip()
+        legacy_name = str(clock_config.get("device_name", "") or "").strip()
+        if (
+            not clock_config.get("connected", False)
+            and legacy_ip == "192.168.1.104"
+            and legacy_password in {"123", "1234"}
+            and legacy_name == "Reloj Principal"
+        ):
+            await db.clock_config.update_one(
+                {"_id": clock_config["_id"]},
+                {"$set": {"device_name": "", "ip": "", "password": ""}}
+            )
+            logger.info("Clock config reset from legacy defaults to empty values")
 
     await db.clock_events.create_index("created_at")
     
