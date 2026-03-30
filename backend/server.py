@@ -233,6 +233,9 @@ class ClockSyncResponse(BaseModel):
     synced_records: int
     generated_report_id: Optional[str] = None
     message: str
+    detected_records: Optional[int] = 0
+    skipped_duplicates: Optional[int] = 0
+    inserted_records: Optional[int] = 0
 
 class ClockConnectionPayload(BaseModel):
     connected: bool
@@ -1342,10 +1345,41 @@ async def sync_clock_attendance(request: Request):
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
     conn = None
+    detected_records = 0
+    skipped_duplicates = 0
+    inserted_records = 0
     try:
-        conn = await run_in_threadpool(_connect_to_clock, config)
+        device_ip = str(config.get("ip", "") or "").strip()
+        device_port = _safe_parse_int(config.get("port", 4370), 4370)
+        device_password = _safe_parse_int(config.get("password", 0), 0)
+        force_udp = bool(config.get("force_udp", False))
+
+        if not device_ip:
+            raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
+
+        try:
+            from zk import ZK  # type: ignore
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f'No se encontró la librería pyzk/zk: {exc}. Instala dependencias con: pip install pyzk'
+            )
+
+        zk_client = ZK(
+            device_ip,
+            port=device_port,
+            timeout=15,
+            password=device_password,
+            force_udp=force_udp,
+            ommit_ping=False
+        )
+
+        conn = await run_in_threadpool(zk_client.connect)
         await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
+        detected_records = len(attendance or [])
+        print(f"[CLOCK_SYNC] Registros detectados por zk.get_attendance(): {detected_records}")
+        logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1357,28 +1391,42 @@ async def sync_clock_attendance(request: Request):
             except Exception:
                 pass
 
-    normalized_records = []
     for item in attendance or []:
         timestamp = getattr(item, "timestamp", None)
-        employee_id = str(getattr(item, "user_id", "") or "").strip()
-        if not employee_id or not isinstance(timestamp, datetime):
+        clock_user_id = str(getattr(item, "user_id", "") or "").strip()
+        if not clock_user_id or not isinstance(timestamp, datetime):
             continue
-        normalized_records.append({
+
+        id_candidates: List[Any] = [clock_user_id]
+        if clock_user_id.isdigit():
+            id_candidates.append(int(clock_user_id))
+        employee_doc = await db.employees.find_one(
+            {"internal_clock_id": {"$in": id_candidates}},
+            {"employee_id": 1}
+        )
+        if not employee_doc:
+            print(f"ID del reloj {clock_user_id} no encontrado en la base de datos")
+            logger.info("ID del reloj %s no encontrado en la base de datos", clock_user_id)
+            continue
+
+        employee_id = str(employee_doc.get("employee_id", "") or "").strip()
+        if not employee_id:
+            continue
+
+        record = {
             "employee_id": employee_id,
             "timestamp": timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
             "type": str(getattr(item, "status", getattr(item, "punch", 0))),
-        })
-
-    synced_records = 0
-    for record in normalized_records:
+        }
         exists = await db.attendance_records.find_one(
             {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
             {"_id": 1}
         )
         if exists:
+            skipped_duplicates += 1
             continue
         await db.attendance_records.insert_one(record)
-        synced_records += 1
+        inserted_records += 1
 
     await db.clock_config.update_one(
         {},
@@ -1387,9 +1435,12 @@ async def sync_clock_attendance(request: Request):
     )
 
     return ClockSyncResponse(
-        synced_records=synced_records,
+        synced_records=inserted_records,
         generated_report_id=None,
         message="Sincronización completada desde el reloj checador",
+        detected_records=detected_records,
+        skipped_duplicates=skipped_duplicates,
+        inserted_records=inserted_records,
     )
 
 
