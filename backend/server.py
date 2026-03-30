@@ -993,7 +993,7 @@ async def get_clock_connection(config: dict):
 
     device_port = _safe_parse_int(config.get("port", 4370), 4370)
     device_password = _safe_parse_int(config.get("password", 0), 0)
-    force_udp = bool(config.get("force_udp", False))
+    force_udp = True
 
     zk_client = ZK(
         device_ip,
@@ -1004,7 +1004,19 @@ async def get_clock_connection(config: dict):
         ommit_ping=False
     )
     try:
-        return await run_in_threadpool(zk_client.connect)
+        conn = await run_in_threadpool(zk_client.connect)
+        try:
+            before_time = await run_in_threadpool(conn.get_time)
+            print(f"[CLOCK_SYNC] Hora del reloj antes de sync: {before_time}")
+        except Exception as time_exc:
+            print(f"[CLOCK_SYNC] No se pudo leer hora antes de sync: {time_exc}")
+        await run_in_threadpool(conn.set_time, datetime.now())
+        try:
+            after_time = await run_in_threadpool(conn.get_time)
+            print(f"[CLOCK_SYNC] Hora del reloj después de sync: {after_time}")
+        except Exception as time_exc:
+            print(f"[CLOCK_SYNC] No se pudo leer hora después de sync: {time_exc}")
+        return conn
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -1390,7 +1402,6 @@ async def sync_clock_attendance(request: Request):
         print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
         print("Conexión exitosa")
-        await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
         print(f"Registros encontrados: {detected_records}")
@@ -1423,16 +1434,15 @@ async def sync_clock_attendance(request: Request):
         if not employee_doc:
             print(f"ID del reloj {clock_user_id} no encontrado en la base de datos")
             logger.info("ID del reloj %s no encontrado en la base de datos", clock_user_id)
-            continue
-
-        employee_id = str(employee_doc.get("employee_id", "") or "").strip()
-        if not employee_id:
-            continue
+            employee_id = "ID Desconocido"
+        else:
+            employee_id = str(employee_doc.get("employee_id", "") or "").strip() or "ID Desconocido"
 
         record = {
             "employee_id": employee_id,
             "timestamp": timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
             "type": str(getattr(item, "status", getattr(item, "punch", 0))),
+            "clock_user_id": clock_user_id,
         }
         exists = await db.attendance_records.find_one(
             {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
