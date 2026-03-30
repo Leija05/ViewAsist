@@ -564,7 +564,7 @@ async def get_excel_preview(report_id: str, request: Request):
         for sheet_name in workbook.sheet_names():
             sheet = workbook.sheet_by_name(sheet_name)
             sheet_data = []
-            for row_idx in range(min(100, sheet.nrows)):
+            for row_idx in range(sheet.nrows):
                 row_data = []
                 for col_idx in range(sheet.ncols):
                     cell_value = sheet.cell_value(row_idx, col_idx)
@@ -944,7 +944,13 @@ def _connect_to_clock(config: Dict[str, Any]):
     try:
         return zk_client.connect()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {exc}")
+        message = str(exc)
+        if "Unauthenticated" in message:
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo autenticar con el reloj. Verifica la Contraseña/Comm Key en Configuración."
+            )
+        raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {message}")
 
 
 def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:

@@ -151,9 +151,7 @@ code, pre, .mono {
   padding: 4px 8px;
   border: 1px solid hsl(var(--border));
   white-space: nowrap;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: none;
 }
 
 /* Loader */

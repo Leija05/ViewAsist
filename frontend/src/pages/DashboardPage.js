@@ -227,7 +227,7 @@ const DashboardPage = () => {
       toast.success('Archivo procesado correctamente');
       await fetchDashboardData();
       await fetchReports();
-      setSelectedReport(response.data.report_id);
+      await loadReportData(response.data.report_id);
       loadExcelPreview(response.data.report_id);
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Error al procesar archivo');
@@ -241,6 +241,7 @@ const DashboardPage = () => {
     try {
       const response = await axios.get(`${API_URL}/api/reports/${reportId}/excel-preview`, { withCredentials: true });
       setExcelPreview(response.data);
+      setSelectedReport(reportId);
       const sheetNames = Object.keys(response.data.sheets);
       if (sheetNames.length > 0) {
         setSelectedSheet(sheetNames[0]);
@@ -248,6 +249,23 @@ const DashboardPage = () => {
       setShowExcelPanel(true);
     } catch (error) {
       toast.error('Error al cargar vista previa del Excel');
+    }
+  };
+
+  const loadReportData = async (reportId) => {
+    try {
+      const response = await axios.get(`${API_URL}/api/reports/${reportId}`, { withCredentials: true });
+      const report = response.data;
+      setDashboardData({
+        has_data: true,
+        report_id: reportId,
+        statistics: report.statistics || {},
+        employees: report.employees || [],
+        alerts: []
+      });
+      setSelectedReport(reportId);
+    } catch (error) {
+      toast.error('No se pudo cargar el reporte seleccionado');
     }
   };
 
@@ -955,7 +973,7 @@ const DashboardPage = () => {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => loadExcelPreview(dashboardData.report_id)}
+                        onClick={() => { loadReportData(dashboardData.report_id); loadExcelPreview(dashboardData.report_id); }}
                         data-testid="view-excel-button"
                         className="border-2"
                       >
@@ -1029,7 +1047,7 @@ const DashboardPage = () => {
                 </div>
                 <div className="divide-y divide-zinc-100 dark:divide-zinc-900">
                   {reports.map((report) => (
-                    <div key={report._id} className="p-4 flex items-center justify-between hover:bg-zinc-50 dark:hover:bg-zinc-900" data-testid={`report-${report._id}`}>
+                    <div key={report._id} className={`p-4 flex items-center justify-between hover:bg-zinc-50 dark:hover:bg-zinc-900 ${selectedReport === report._id ? 'bg-zinc-100 dark:bg-zinc-900/70' : ''}`} data-testid={`report-${report._id}`}>
                       <div className="flex items-center gap-3">
                         <FileSpreadsheet className="w-5 h-5 text-zinc-400" />
                         <div>
@@ -1042,7 +1060,7 @@ const DashboardPage = () => {
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <Button variant="ghost" size="sm" onClick={() => loadExcelPreview(report._id)}>
+                        <Button variant="ghost" size="sm" onClick={() => { loadReportData(report._id); loadExcelPreview(report._id); }}>
                           <Eye className="w-4 h-4" />
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => handleExportPDF(report._id)}>
@@ -1121,11 +1139,11 @@ const DashboardPage = () => {
 
             {/* Sheet Content */}
             <ScrollArea className="flex-1">
-              <div className="p-2">
+              <div className="p-2 overflow-x-auto">
                 {selectedSheet && excelPreview.sheets[selectedSheet] && (
-                  <table className="excel-preview-table w-full">
+                  <table className="excel-preview-table w-max min-w-full">
                     <tbody>
-                      {excelPreview.sheets[selectedSheet].slice(0, 50).map((row, rowIdx) => (
+                      {excelPreview.sheets[selectedSheet].map((row, rowIdx) => (
                         <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 font-semibold' : rowIdx % 2 === 0 ? 'bg-white' : 'bg-zinc-50'}>
                           {row.map((cell, colIdx) => (
                             <td key={colIdx} title={cell}>
