@@ -60,7 +60,7 @@
     "build": "craco build",
     "test": "craco test",
     "electron": "electron ./electron/main.js",
-    "dev:electron": "concurrently -k \"cross-env BROWSER=none REACT_APP_BACKEND_URL=http://127.0.0.1:8000 craco start\" \"wait-on http://localhost:3000 && cross-env ELECTRON_START_URL=http://localhost:3000 electron ./electron/main.js\""
+    "dev:electron": "concurrently -k \"cross-env BROWSER=none REACT_APP_BACKEND_URL=http://localhost:8000 craco start\" \"wait-on http://localhost:3000 && cross-env ELECTRON_START_URL=http://localhost:3000 BACKEND_HOST=localhost electron ./electron/main.js\""
   },
   "browserslist": {
     "production": [

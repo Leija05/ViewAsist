@@ -18,6 +18,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -85,6 +86,21 @@ const DashboardPage = () => {
   const [clockStatus, setClockStatus] = useState(null);
   const [clockUsers, setClockUsers] = useState([]);
   const [liveAttendance, setLiveAttendance] = useState([]);
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
+  const [clockUserDialogOpen, setClockUserDialogOpen] = useState(false);
+  const [clockUserDialogMode, setClockUserDialogMode] = useState('create');
+  const [editingClockUserId, setEditingClockUserId] = useState(null);
+  const [clockUserForm, setClockUserForm] = useState({
+    user_id: '',
+    name: '',
+    department: 'General',
+    work_schedule: 'Turno General'
+  });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('theme', theme);
+  }, [theme]);
 
   const fetchDashboardData = useCallback(async () => {
     try {
@@ -315,48 +331,65 @@ const DashboardPage = () => {
     }
   };
 
-  const handleAddClockUser = async () => {
-    const user_id = window.prompt('ID del usuario');
-    if (!user_id) return;
-    const name = window.prompt('Nombre del usuario');
-    if (!name) return;
-    const department = window.prompt('Departamento', 'General') || 'General';
-    try {
-      await axios.post(`${API_URL}/api/clock/users`, {
-        user_id,
-        name,
-        department,
-        privilege: 'empleado',
-        password: '',
-        card_number: '',
-        fingerprint_registered: false,
-        face_registered: false,
-        vein_registered: false,
-        work_schedule: 'Turno General',
-        enabled: true
-      }, { withCredentials: true });
-      toast.success('Usuario creado');
-      await fetchClockUsers();
-    } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudo crear el usuario');
-    }
+  const openCreateClockUserDialog = () => {
+    setClockUserDialogMode('create');
+    setEditingClockUserId(null);
+    setClockUserForm({
+      user_id: '',
+      name: '',
+      department: 'General',
+      work_schedule: 'Turno General'
+    });
+    setClockUserDialogOpen(true);
   };
 
-  const handleEditClockUser = async (user) => {
-    const name = window.prompt('Nuevo nombre', user.name);
-    if (!name) return;
-    const department = window.prompt('Departamento', user.department || 'General') || 'General';
-    const work_schedule = window.prompt('Horario de trabajo', user.work_schedule || 'Turno General') || 'Turno General';
+  const openEditClockUserDialog = (user) => {
+    setClockUserDialogMode('edit');
+    setEditingClockUserId(user.user_id);
+    setClockUserForm({
+      user_id: user.user_id || '',
+      name: user.name || '',
+      department: user.department || 'General',
+      work_schedule: user.work_schedule || 'Turno General'
+    });
+    setClockUserDialogOpen(true);
+  };
+
+  const handleSubmitClockUser = async () => {
+    if (!clockUserForm.user_id?.trim() || !clockUserForm.name?.trim()) {
+      toast.error('ID y nombre son obligatorios');
+      return;
+    }
+
     try {
-      await axios.put(`${API_URL}/api/clock/users/${user.user_id}`, {
-        name,
-        department,
-        work_schedule
-      }, { withCredentials: true });
-      toast.success('Usuario actualizado');
+      if (clockUserDialogMode === 'create') {
+        await axios.post(`${API_URL}/api/clock/users`, {
+          user_id: clockUserForm.user_id.trim(),
+          name: clockUserForm.name.trim(),
+          department: clockUserForm.department.trim() || 'General',
+          privilege: 'empleado',
+          password: '',
+          card_number: '',
+          fingerprint_registered: false,
+          face_registered: false,
+          vein_registered: false,
+          work_schedule: clockUserForm.work_schedule.trim() || 'Turno General',
+          enabled: true
+        }, { withCredentials: true });
+        toast.success('Usuario creado');
+      } else {
+        await axios.put(`${API_URL}/api/clock/users/${editingClockUserId}`, {
+          name: clockUserForm.name.trim(),
+          department: clockUserForm.department.trim() || 'General',
+          work_schedule: clockUserForm.work_schedule.trim() || 'Turno General'
+        }, { withCredentials: true });
+        toast.success('Usuario actualizado');
+      }
+
       await fetchClockUsers();
+      setClockUserDialogOpen(false);
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudo actualizar usuario');
+      toast.error(error.response?.data?.detail || 'No se pudo guardar usuario');
     }
   };
 
@@ -451,11 +484,11 @@ const DashboardPage = () => {
   ].filter(d => d.value > 0);
 
   return (
-    <div className="min-h-screen bg-white">
-      <Toaster position="top-right" />
+    <div className="min-h-screen bg-white dark:bg-zinc-950 dark:text-zinc-100 transition-colors">
+      <Toaster position="top-right" toastOptions={{ className: 'max-w-[420px] break-words' }} />
       
       {/* Top Navigation */}
-      <header className="sticky top-0 z-50 bg-white/70 backdrop-blur-xl border-b border-zinc-200">
+      <header className="sticky top-0 z-50 bg-white/70 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800">
         <div className="px-4 md:px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-black flex items-center justify-center">
@@ -487,16 +520,39 @@ const DashboardPage = () => {
               </div>
             </label>
 
+            <Button
+              variant="outline"
+              size="icon"
+              className="border-2 border-zinc-200 hover:border-black dark:border-zinc-700 dark:hover:border-zinc-300"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              title={theme === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro'}
+              data-testid="theme-toggle-button"
+            >
+              {theme === 'dark' ? (
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
+                  <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 1 0 9.8 9.8Z" />
+                </svg>
+              )}
+            </Button>
+
             {/* Settings */}
             <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
               <DialogTrigger asChild>
-                <Button variant="outline" size="icon" data-testid="settings-button" className="border-2 border-zinc-200 hover:border-black">
+                <Button variant="outline" size="icon" data-testid="settings-button" className="border-2 border-zinc-200 hover:border-black dark:border-zinc-700 dark:hover:border-zinc-300">
                   <Settings className="w-4 h-4" />
                 </Button>
               </DialogTrigger>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
                   <DialogTitle className="text-xl font-bold">Configuración</DialogTitle>
+                  <DialogDescription>
+                    Ajusta reglas de asistencia, conexión del reloj y actualizaciones.
+                  </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2">
@@ -733,7 +789,7 @@ const DashboardPage = () => {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" className="border-2" onClick={handleAddClockUser}>+ Agregar usuario</Button>
+                  <Button variant="outline" className="border-2" onClick={openCreateClockUserDialog}>+ Agregar usuario</Button>
                   <Button variant="outline" className="border-2" onClick={handlePullUsers}>Importar usuarios del reloj</Button>
                   <Button variant="outline" className="border-2" onClick={handlePushUsers}>Subir usuarios al reloj (Wi-Fi)</Button>
                   <Button variant="outline" className="border-2" onClick={handleSyncFromClock}>Descargar asistencias</Button>
@@ -761,7 +817,7 @@ const DashboardPage = () => {
                               <td className="p-2">{u.fingerprint_registered ? 'Sí' : 'No'}</td>
                               <td className="p-2">{u.work_schedule || 'Turno General'}</td>
                               <td className="p-2 flex gap-1">
-                                <Button size="sm" variant="ghost" onClick={() => handleEditClockUser(u)}>Editar</Button>
+                                <Button size="sm" variant="ghost" onClick={() => openEditClockUserDialog(u)}>Editar</Button>
                                 <Button size="sm" variant="ghost" className="text-red-600" onClick={() => handleDeleteClockUser(u)}>Borrar</Button>
                               </td>
                             </tr>
@@ -1076,6 +1132,9 @@ const DashboardPage = () => {
         <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Historial de Asistencia - {selectedEmployee}</DialogTitle>
+            <DialogDescription>
+              Registros recientes del empleado seleccionado.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             {employeeHistory && employeeHistory.length > 0 ? (
@@ -1109,6 +1168,46 @@ const DashboardPage = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Clock User Dialog */}
+      <Dialog open={clockUserDialogOpen} onOpenChange={setClockUserDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{clockUserDialogMode === 'create' ? 'Agregar usuario del reloj' : 'Editar usuario del reloj'}</DialogTitle>
+            <DialogDescription>
+              Completa los campos del usuario para guardarlo en la app.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label>ID del usuario</Label>
+              <Input
+                value={clockUserForm.user_id}
+                disabled={clockUserDialogMode === 'edit'}
+                onChange={(e) => setClockUserForm({ ...clockUserForm, user_id: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Nombre</Label>
+              <Input value={clockUserForm.name} onChange={(e) => setClockUserForm({ ...clockUserForm, name: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>Departamento</Label>
+              <Input value={clockUserForm.department} onChange={(e) => setClockUserForm({ ...clockUserForm, department: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>Horario</Label>
+              <Input value={clockUserForm.work_schedule} onChange={(e) => setClockUserForm({ ...clockUserForm, work_schedule: e.target.value })} />
+            </div>
+            <div className="flex gap-2 pt-2">
+              <Button variant="outline" className="flex-1" onClick={() => setClockUserDialogOpen(false)}>Cancelar</Button>
+              <Button className="flex-1 bg-black hover:bg-zinc-800" onClick={handleSubmitClockUser}>
+                {clockUserDialogMode === 'create' ? 'Crear usuario' : 'Guardar cambios'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
@@ -1116,17 +1215,17 @@ const DashboardPage = () => {
 // Stat Card Component
 const StatCard = ({ icon, label, value, variant = 'default', testId }) => {
   const variants = {
-    default: 'bg-white border-zinc-200',
-    danger: 'bg-red-50 border-red-200',
-    warning: 'bg-yellow-50 border-yellow-200',
-    success: 'bg-green-50 border-green-200'
+    default: 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800',
+    danger: 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900',
+    warning: 'bg-yellow-50 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-900',
+    success: 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900'
   };
 
   const iconVariants = {
-    default: 'text-zinc-600',
-    danger: 'text-red-600',
-    warning: 'text-yellow-600',
-    success: 'text-green-600'
+    default: 'text-zinc-600 dark:text-zinc-300',
+    danger: 'text-red-600 dark:text-red-300',
+    warning: 'text-yellow-600 dark:text-yellow-300',
+    success: 'text-green-600 dark:text-green-300'
   };
 
   return (
