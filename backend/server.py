@@ -15,6 +15,7 @@ import io
 import secrets
 import socket
 from pathlib import Path
+from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
@@ -1183,10 +1184,35 @@ async def root():
 # Include the router in the main app
 app.include_router(api_router)
 
+def get_allowed_origins() -> List[str]:
+    raw_origins = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+    expanded_origins = set(origins)
+    for origin in origins:
+        parsed = urlparse(origin)
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        if "localhost" in parsed.netloc:
+            expanded_origins.add(origin.replace("localhost", "127.0.0.1"))
+        if "127.0.0.1" in parsed.netloc:
+            expanded_origins.add(origin.replace("127.0.0.1", "localhost"))
+
+    # Common local dev origins
+    expanded_origins.update({
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    })
+    return sorted(expanded_origins)
+
+ALLOWED_ORIGINS = get_allowed_origins()
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1202,27 +1228,57 @@ logger = logging.getLogger(__name__)
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    # Seed admin user
+    logger.info(f"CORS allow_origins: {ALLOWED_ORIGINS}")
+
+    async def upsert_seed_user(email: str, password: str, name: str, role: str, extra_fields: Optional[Dict[str, Any]] = None):
+        existing = await db.users.find_one({"email": email})
+        extra_fields = extra_fields or {}
+        base_updates = {
+            "name": name,
+            "role": role,
+            **extra_fields
+        }
+
+        if existing is None:
+            await db.users.insert_one({
+                "email": email,
+                "password_hash": hash_password(password),
+                "created_at": datetime.now(timezone.utc),
+                **base_updates
+            })
+            logger.info(f"Seed user created: {email}")
+            return
+
+        updates = dict(base_updates)
+        if not verify_password(password, existing["password_hash"]):
+            updates["password_hash"] = hash_password(password)
+            logger.info(f"Seed user password updated: {email}")
+        await db.users.update_one({"email": email}, {"$set": updates})
+
+    # Seed users
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
-    
-    existing = await db.users.find_one({"email": admin_email})
-    if existing is None:
-        hashed = hash_password(admin_password)
-        await db.users.insert_one({
-            "email": admin_email,
-            "password_hash": hashed,
-            "name": "Administrador",
-            "role": "admin",
-            "created_at": datetime.now(timezone.utc)
-        })
-        logger.info(f"Admin user created: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one(
-            {"email": admin_email},
-            {"$set": {"password_hash": hash_password(admin_password)}}
-        )
-        logger.info(f"Admin password updated: {admin_email}")
+    await upsert_seed_user(admin_email, admin_password, "Administrador", "admin")
+
+    developer_email = os.environ.get("DEVELOPER_EMAIL", "leijahector5@gmail.com")
+    developer_password = os.environ.get("DEVELOPER_PASSWORD", "/Leija091105")
+    await upsert_seed_user(
+        developer_email,
+        developer_password,
+        "Héctor Leija",
+        "developer",
+        {
+            "developer_options": {
+                "feature_flags": {
+                    "beta_dashboard": True,
+                    "diagnostic_mode": True,
+                    "export_debug_logs": True
+                },
+                "can_manage_clock_config": True,
+                "can_trigger_manual_sync": True
+            }
+        }
+    )
     
     # Create indexes
     await db.users.create_index("email", unique=True)
@@ -1264,6 +1320,11 @@ async def startup_event():
 - Email: {admin_email}
 - Password: {admin_password}
 - Role: admin
+
+## Developer Account
+- Email: {developer_email}
+- Password: {developer_password}
+- Role: developer
 
 ## Auth Endpoints
 - POST /api/auth/login
