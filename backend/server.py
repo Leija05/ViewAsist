@@ -18,11 +18,6 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
 
 
 ROOT_DIR = Path(__file__).parent
@@ -72,6 +67,30 @@ def get_xlrd_module():
         raise HTTPException(
             status_code=503,
             detail='Falta dependencia opcional "xlrd". Ejecuta: pip install xlrd==2.0.1',
+        ) from exc
+
+def get_reportlab_modules():
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        return {
+            "colors": colors,
+            "letter": letter,
+            "landscape": landscape,
+            "SimpleDocTemplate": SimpleDocTemplate,
+            "Table": Table,
+            "TableStyle": TableStyle,
+            "Paragraph": Paragraph,
+            "Spacer": Spacer,
+            "getSampleStyleSheet": getSampleStyleSheet,
+            "ParagraphStyle": ParagraphStyle,
+        }
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail='Falta dependencia opcional "reportlab". Ejecuta: pip install reportlab',
         ) from exc
 
 async def get_current_user(request: Request) -> dict:
@@ -603,6 +622,18 @@ async def export_pdf(report_id: str, request: Request):
         if not report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         
+        reportlab = get_reportlab_modules()
+        colors = reportlab["colors"]
+        SimpleDocTemplate = reportlab["SimpleDocTemplate"]
+        Table = reportlab["Table"]
+        TableStyle = reportlab["TableStyle"]
+        Paragraph = reportlab["Paragraph"]
+        Spacer = reportlab["Spacer"]
+        getSampleStyleSheet = reportlab["getSampleStyleSheet"]
+        ParagraphStyle = reportlab["ParagraphStyle"]
+        letter = reportlab["letter"]
+        landscape = reportlab["landscape"]
+
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
         elements = []
