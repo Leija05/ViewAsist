@@ -931,7 +931,10 @@ def _connect_to_clock(config: Dict[str, Any]):
     try:
         from zk import ZK  # type: ignore
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se encontró la librería pyzk/zk: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f'No se encontró la librería pyzk/zk: {exc}. Instala dependencias con: pip install pyzk'
+        )
 
     device_ip = config["ip"]
     device_port = int(config.get("port", 4370))
