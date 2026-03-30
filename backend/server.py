@@ -10,7 +10,6 @@ import os
 import logging
 import bcrypt
 import jwt
-import xlrd
 import io
 import secrets
 import socket
@@ -64,6 +63,16 @@ def create_refresh_token(user_id: str) -> str:
         "type": "refresh"
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def get_xlrd_module():
+    try:
+        import xlrd
+        return xlrd
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail='Falta dependencia opcional "xlrd". Ejecuta: pip install xlrd==2.0.1',
+        ) from exc
 
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
@@ -285,6 +294,7 @@ async def upload_excel(request: Request, file: UploadFile = File(...)):
         tolerance = settings["tolerance_minutes"]
         
         # Parse Excel
+        xlrd = get_xlrd_module()
         workbook = xlrd.open_workbook(file_contents=content)
         
         all_data = {
@@ -471,6 +481,7 @@ async def get_excel_preview(report_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         
         content = report["raw_content"]
+        xlrd = get_xlrd_module()
         workbook = xlrd.open_workbook(file_contents=content)
         
         sheets_data = {}
