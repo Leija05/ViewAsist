@@ -13,6 +13,7 @@ import jwt
 import io
 import secrets
 import socket
+import ipaddress
 from pathlib import Path
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
@@ -959,6 +960,27 @@ def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _same_subnet(local_ip: str, clock_ip: str, prefix: int = 24) -> bool:
+    try:
+        local_net = ipaddress.ip_network(f"{local_ip}/{prefix}", strict=False)
+        return ipaddress.ip_address(clock_ip) in local_net
+    except Exception:
+        return False
+
+
+def _get_local_ipv4s() -> List[str]:
+    ips = {"127.0.0.1"}
+    try:
+        hostname = socket.gethostname()
+        for result in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = result[4][0]
+            if ip:
+                ips.add(ip)
+    except Exception:
+        pass
+    return sorted(ips)
+
+
 @api_router.get("/clock/config")
 async def get_clock_config(request: Request):
     await get_current_user(request)
@@ -1036,6 +1058,21 @@ async def get_clock_status(request: Request):
         "users_count": users_count,
         "last_sync": config.get("last_sync"),
         "last_event_at": last_event.get("created_at") if last_event else None,
+    }
+
+
+@api_router.get("/clock/network-check")
+async def get_clock_network_check(request: Request):
+    await get_current_user(request)
+    config = await db.clock_config.find_one({}, {"_id": 0}) or {}
+    clock_ip = str(config.get("ip", "") or "").strip()
+    local_ips = _get_local_ipv4s()
+    same_subnet = any(_same_subnet(local_ip, clock_ip) for local_ip in local_ips if local_ip != "127.0.0.1") if clock_ip else False
+    return {
+        "clock_ip": clock_ip,
+        "local_ips": local_ips,
+        "same_subnet": same_subnet,
+        "message": "Equipo y reloj en misma red" if same_subnet else "Equipo y reloj parecen estar en redes distintas"
     }
 
 

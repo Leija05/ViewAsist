@@ -87,6 +87,8 @@ const DashboardPage = () => {
   const [clockUsers, setClockUsers] = useState([]);
   const [liveAttendance, setLiveAttendance] = useState([]);
   const [clockLibraryMissing, setClockLibraryMissing] = useState(false);
+  const [clockReadOnly, setClockReadOnly] = useState(false);
+  const [clockNetwork, setClockNetwork] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
   const [clockUserDialogOpen, setClockUserDialogOpen] = useState(false);
   const [clockUserDialogMode, setClockUserDialogMode] = useState('create');
@@ -153,6 +155,7 @@ const DashboardPage = () => {
       const response = await axios.get(`${API_URL}/api/clock/status`, { withCredentials: true });
       setClockStatus(response.data);
       setClockLibraryMissing(false);
+      setClockReadOnly(!response.data?.connected);
     } catch (error) {
       console.error('Error fetching clock status:', error);
     }
@@ -162,10 +165,23 @@ const DashboardPage = () => {
     const detail = error?.response?.data?.detail || '';
     if (typeof detail === 'string' && detail.toLowerCase().includes('pyzk/zk')) {
       setClockLibraryMissing(true);
+      setClockReadOnly(true);
       return 'Falta la librería del reloj (pyzk). Instala en tu entorno Python: pip install pyzk';
+    }
+    if (typeof detail === 'string' && detail.toLowerCase().includes('autenticar')) {
+      setClockReadOnly(true);
     }
     return detail || fallbackMessage;
   };
+
+  const fetchClockNetworkStatus = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/clock/network-check`, { withCredentials: true });
+      setClockNetwork(response.data);
+    } catch (error) {
+      setClockNetwork(null);
+    }
+  }, []);
 
   const fetchClockUsers = useCallback(async () => {
     try {
@@ -196,12 +212,13 @@ const DashboardPage = () => {
         fetchClockStatus(),
         fetchClockUsers(),
         fetchLiveAttendance(),
-        fetchVersion()
+        fetchVersion(),
+        fetchClockNetworkStatus()
       ]);
       setLoading(false);
     };
     loadData();
-  }, [fetchDashboardData, fetchReports, fetchSettings, fetchClockConfig, fetchClockStatus, fetchClockUsers, fetchLiveAttendance, fetchVersion]);
+  }, [fetchDashboardData, fetchReports, fetchSettings, fetchClockConfig, fetchClockStatus, fetchClockUsers, fetchLiveAttendance, fetchVersion, fetchClockNetworkStatus]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -822,12 +839,17 @@ const DashboardPage = () => {
                     <p className="font-medium">{clockStatus?.last_sync ? new Date(clockStatus.last_sync).toLocaleString('es-MX') : 'Sin sync'}</p>
                   </div>
                 </div>
+                {clockNetwork && (
+                  <div className={`p-2 text-xs border ${clockNetwork.same_subnet ? 'border-green-600/40 bg-green-500/10 text-green-300' : 'border-yellow-600/40 bg-yellow-500/10 text-yellow-200'}`}>
+                    Red reloj: {clockNetwork.message} (Reloj: {clockNetwork.clock_ip || 'sin IP'} | Equipo: {clockNetwork.local_ips?.join(', ')})
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" className="border-2" onClick={openCreateClockUserDialog}>+ Agregar usuario</Button>
-                  <Button variant="outline" className="border-2" onClick={handlePullUsers}>Importar usuarios del reloj</Button>
-                  <Button variant="outline" className="border-2" onClick={handlePushUsers}>Subir usuarios al reloj (Wi-Fi)</Button>
-                  <Button variant="outline" className="border-2" onClick={handleSyncFromClock}>Descargar asistencias</Button>
-                  <Button variant="outline" className="border-2" onClick={fetchLiveAttendance}>Actualizar tiempo real</Button>
+                  <Button variant="outline" className="border-2" onClick={handlePullUsers} disabled={clockReadOnly}>Importar usuarios del reloj</Button>
+                  <Button variant="outline" className="border-2" onClick={handlePushUsers} disabled={clockReadOnly}>Subir usuarios al reloj (Wi-Fi)</Button>
+                  <Button variant="outline" className="border-2" onClick={handleSyncFromClock} disabled={clockReadOnly}>Descargar asistencias</Button>
+                  <Button variant="outline" className="border-2" onClick={fetchLiveAttendance} disabled={clockReadOnly}>Actualizar tiempo real</Button>
                 </div>
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                   <div className="border border-zinc-200 dark:border-zinc-800">
