@@ -9,6 +9,38 @@ const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const projectRoot = path.resolve(__dirname, '..', '..');
 
 let backendProcess = null;
+let backendExitInfo = null;
+const backendStderrBuffer = [];
+
+function appendBackendStderr(chunk) {
+  const text = chunk.toString();
+  process.stderr.write(text);
+
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  backendStderrBuffer.push(...lines);
+  if (backendStderrBuffer.length > 60) {
+    backendStderrBuffer.splice(0, backendStderrBuffer.length - 60);
+  }
+}
+
+function getBackendStartupHelp() {
+  if (!backendExitInfo) {
+    return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que MongoDB esté disponible y vuelve a intentar.`;
+  }
+
+  const moduleMissingLine = backendStderrBuffer.find((line) => line.includes('ModuleNotFoundError:'));
+  const missingModuleMatch = moduleMissingLine && moduleMissingLine.match(/No module named '([^']+)'/);
+
+  const processSummary = backendExitInfo.signal
+    ? `El backend terminó por señal ${backendExitInfo.signal}.`
+    : `El backend terminó con código ${backendExitInfo.code}.`;
+
+  if (missingModuleMatch) {
+    return `${processSummary}\n\nFalta el módulo de Python "${missingModuleMatch[1]}".\nInstala dependencias del backend (por ejemplo: pip install -r backend/requirements.txt) y vuelve a intentar.`;
+  }
+
+  return `${processSummary}\n\nRevisa la consola para ver el traceback completo del backend y vuelve a intentar.`;
+}
 
 function getPythonCandidates() {
   if (process.env.ELECTRON_PYTHON_PATH) {
@@ -55,6 +87,9 @@ async function waitForBackend(maxAttempts = 40, delayMs = 500) {
 }
 
 async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
+  backendExitInfo = null;
+  backendStderrBuffer.length = 0;
+
   const child = spawn(pythonCmd, [...pythonCmdArgs, ...backendArgs], {
     cwd: projectRoot,
     env: {
@@ -63,12 +98,22 @@ async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
       DB_NAME: process.env.DB_NAME || 'viewasist',
       FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
     },
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
   await new Promise((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
+  });
+
+  if (child.stdout) {
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk.toString()));
+  }
+  if (child.stderr) {
+    child.stderr.on('data', appendBackendStderr);
+  }
+  child.on('exit', (code, signal) => {
+    backendExitInfo = { code, signal };
   });
 
   backendProcess = child;
@@ -134,7 +179,7 @@ app.whenReady().then(() => {
       if (!ready) {
         dialog.showErrorBox(
           'Backend no disponible',
-          `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que MongoDB esté disponible y vuelve a intentar.`
+          getBackendStartupHelp()
         );
       }
       createWindow();
