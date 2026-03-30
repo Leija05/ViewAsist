@@ -1,0 +1,92 @@
+{
+  "theme": "light",
+  "archetype": "4_swiss_high_contrast",
+  "colors": {
+    "background": "#FFFFFF",
+    "foreground": "#0A0A0A",
+    "card": "#FFFFFF",
+    "card_foreground": "#0A0A0A",
+    "primary": "#0A0A0A",
+    "primary_foreground": "#FFFFFF",
+    "secondary": "#F4F4F5",
+    "secondary_foreground": "#0A0A0A",
+    "muted": "#F4F4F5",
+    "muted_foreground": "#71717A",
+    "accent": "#F4F4F5",
+    "accent_foreground": "#0A0A0A",
+    "destructive": "#E53935",
+    "destructive_foreground": "#FFFFFF",
+    "warning": "#FACC15",
+    "warning_foreground": "#422006",
+    "border": "#E4E4E7",
+    "input": "#E4E4E7",
+    "ring": "#0A0A0A"
+  },
+  "typography": {
+    "font_family": {
+      "heading": "'Chivo', sans-serif",
+      "body": "'IBM Plex Sans', sans-serif",
+      "mono": "'JetBrains Mono', monospace"
+    },
+    "scale": {
+      "h1": "text-4xl tracking-tight font-black",
+      "h2": "text-2xl tracking-tight font-bold",
+      "h3": "text-xl tracking-tight font-semibold",
+      "h4": "text-lg font-semibold",
+      "body": "text-sm leading-relaxed",
+      "small": "text-xs tracking-[0.05em] uppercase"
+    },
+    "imports": [
+      "@import url('https://fonts.googleapis.com/css2?family=Chivo:ital,wght@0,300..900;1,300..900&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=JetBrains+Mono:wght@400;500;700&display=swap');"
+    ]
+  },
+  "layout_and_spacing": {
+    "philosophy": "Control Room Grid. High density, structural grayscale hierarchy. Minimal negative space inside data widgets.",
+    "spacing_scale": "Tight padding for data (p-2, p-4), generous margins between structural sections (p-8).",
+    "container": "w-full max-w-none px-4 md:px-6",
+    "grid": {
+      "dashboard": "grid grid-cols-1 md:grid-cols-4 lg:grid-cols-12 gap-4 lg:gap-6",
+      "main_content": "col-span-1 md:col-span-4 lg:col-span-8 space-y-6",
+      "side_panel": "col-span-1 md:col-span-4 lg:col-span-4 h-[calc(100vh-theme(spacing.20))] sticky top-20 border-l border-border pl-6 overflow-y-auto"
+    },
+    "radius": "rounded-none" 
+  },
+  "components_strategy": {
+    "cards": "Cardless design. Flat white backgrounds with 1px solid border-border. No shadows. Sharp corners (rounded-none).",
+    "buttons": "Square corners. Primary buttons are solid black. Secondary buttons are transparent with 1px black border.",
+    "tables": "Dense. border-collapse. border-b border-border on rows. Hover: bg-zinc-50.",
+    "charts": "Recharts. Use sharp monochromatic bars or lines, with Signal Red / Warning Yellow exclusively for data anomalies (absences/lateness).",
+    "navigation": "Top fixed nav bar, backdrop-blur-xl bg-white/70, 1px bottom border. Include persistent admin session status.",
+    "badges": "Sharp rectangular badges. Red for absence, Yellow for delay, Zinc for on-time."
+  },
+  "motion_and_interactions": {
+    "hover": "High contrast hover states. Buttons: hover:bg-zinc-800. Rows: hover:bg-zinc-100.",
+    "transitions": "Fast, mechanical transitions. transition-all duration-150 ease-linear.",
+    "loaders": "Stark monochrome spinners or linear progress bars."
+  },
+  "media": {
+    "login_background": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/edcfcb89-ea1e-4a24-9005-fb174fda6ddc/images/1d79a7c2a964afb0e3a526c559e032300a4b0ce7fb5efed4ec7ae669ca82d1f5.png",
+      "description": "Minimalist Swiss graphic design poster style background for the login page."
+    },
+    "employee_avatars": [
+      "https://images.pexels.com/photos/5945435/pexels-photo-5945435.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "https://images.pexels.com/photos/6773501/pexels-photo-6773501.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "https://images.unsplash.com/photo-1724596734619-3cb11db3b21a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODF8MHwxfHNlYXJjaHwzfHxvZmZpY2UlMjB3b3JrZXJzJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzc0ODkwNzI0fDA&ixlib=rb-4.1.0&q=85"
+    ]
+  },
+  "testing_attributes": {
+    "rule": "All interactive elements MUST have a data-testid attribute in kebab-case."
+  },
+  "instructions_to_main_agent": [
+    "Install and use 'lucide-react' for crisp, technical icons.",
+    "Implement Recharts for attendance trends (bars for daily presence, lines for trends).",
+    "Use standard Shadcn UI components but override border-radius to '0' (rounded-none) and remove box-shadows globally in Tailwind config for the Swiss Brutalist feel.",
+    "Build the dashboard layout with a 12-column grid. The main content spans 8 columns, and the Excel Viewer Side Panel spans 4 columns on the right.",
+    "Ensure 'login_background' image is used in the login page with a dark overlay to maintain text readability.",
+    "Use the configured 'destructive' red and 'warning' yellow specifically for highlighting 'Faltas' (Absences) and 'Retardos' (Delays) in tables and charts.",
+    "Implement data-testid on all key elements (login-button, excel-upload-input, export-pdf-button, update-check-button, etc.).",
+    "Use 'IBM Plex Sans' for all data tables to ensure numbers align perfectly.",
+    "Implement a sticky sidebar for the Excel viewer to allow users to scroll through the table while keeping the Excel data visible."
+  ]
+}

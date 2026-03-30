@@ -1,0 +1,112 @@
+const { app, BrowserWindow, dialog } = require('electron');
+const path = require('path');
+const { spawn } = require('child_process');
+const http = require('http');
+
+const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
+const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8000);
+const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
+const projectRoot = path.resolve(__dirname, '..', '..');
+
+let backendProcess = null;
+
+function isBackendHealthy(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const req = http.get(`${BACKEND_URL}/api/`, { timeout: timeoutMs }, (res) => {
+      resolve(res.statusCode >= 200 && res.statusCode < 500);
+      res.resume();
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForBackend(maxAttempts = 40, delayMs = 500) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const ok = await isBackendHealthy();
+    if (ok) return true;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
+}
+
+function startBackendIfNeeded() {
+  return new Promise(async (resolve, reject) => {
+    const alreadyRunning = await isBackendHealthy();
+    if (alreadyRunning) {
+      resolve(false);
+      return;
+    }
+
+    const pythonCmd = process.env.ELECTRON_PYTHON_PATH || 'python3';
+    const backendArgs = ['-m', 'uvicorn', 'backend.server:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)];
+
+    backendProcess = spawn(pythonCmd, backendArgs, {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        MONGO_URL: process.env.MONGO_URL || 'mongodb://127.0.0.1:27017',
+        DB_NAME: process.env.DB_NAME || 'viewasist',
+        FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+      },
+      stdio: 'inherit',
+    });
+
+    backendProcess.on('error', (err) => reject(err));
+    resolve(true);
+  });
+}
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 1100,
+    minHeight: 700,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  const startUrl = process.env.ELECTRON_START_URL || `file://${path.join(__dirname, '../build/index.html')}`;
+  win.loadURL(startUrl);
+}
+
+app.whenReady().then(() => {
+  (async () => {
+    try {
+      await startBackendIfNeeded();
+      const ready = await waitForBackend();
+      if (!ready) {
+        dialog.showErrorBox(
+          'Backend no disponible',
+          `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que MongoDB esté disponible y vuelve a intentar.`
+        );
+      }
+      createWindow();
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      });
+    } catch (error) {
+      dialog.showErrorBox('Error iniciando backend', String(error));
+      createWindow();
+    }
+  })();
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  if (backendProcess && !backendProcess.killed) {
+    backendProcess.kill('SIGTERM');
+  }
+});
