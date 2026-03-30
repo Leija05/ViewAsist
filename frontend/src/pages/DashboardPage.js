@@ -74,7 +74,7 @@ const DashboardPage = () => {
   const [excelPreview, setExcelPreview] = useState(null);
   const [selectedSheet, setSelectedSheet] = useState(null);
   const [settings, setSettings] = useState({ entry_time: '09:00', tolerance_minutes: 30, work_hours: 9 });
-  const [clockConfig, setClockConfig] = useState({ device_name: 'Reloj Principal', ip: '192.168.1.104', port: 4370, password: '123', rules: [{ name: 'Turno General', expected_entry_time: '09:00', tolerance_minutes: 30 }] });
+  const [clockConfig, setClockConfig] = useState({ device_name: '', ip: '', port: 4370, password: '', rules: [{ name: 'Turno General', expected_entry_time: '09:00', tolerance_minutes: 30 }] });
   const [versionInfo, setVersionInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -367,6 +367,21 @@ const DashboardPage = () => {
   };
 
   const handleToggleConnection = async (nextValue) => {
+    if (nextValue) {
+      if (!clockConfig.ip?.trim()) {
+        toast.error('Ingresa la IP del reloj antes de conectar');
+        return;
+      }
+      if (!clockConfig.port || Number(clockConfig.port) <= 0) {
+        toast.error('Ingresa un puerto válido');
+        return;
+      }
+      if (!String(clockConfig.password || '').trim()) {
+        toast.error('Ingresa la Contraseña/Comm Key antes de conectar');
+        return;
+      }
+    }
+
     try {
       await axios.post(`${API_URL}/api/clock/connection`, { connected: nextValue }, { withCredentials: true });
       toast.success(nextValue ? 'Reloj conectado' : 'Reloj desconectado');
