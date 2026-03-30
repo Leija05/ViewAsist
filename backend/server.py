@@ -6,7 +6,6 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
-from zk import ZK
 from bson import ObjectId
 import os
 import logging
@@ -16,11 +15,19 @@ import io
 import secrets
 import socket
 import ipaddress
+import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
+
+try:
+    from zk import ZK
+except Exception:
+    ZK = None
+
+socket.setdefaulttimeout(20)
 
 
 ROOT_DIR = Path(__file__).parent
@@ -977,6 +984,9 @@ def _connect_to_clock(config: Dict[str, Any]):
 
 
 async def get_clock_connection(config: dict):
+    if ZK is None:
+        raise HTTPException(status_code=500, detail="Error: Librería pyzk no instalada en el servidor")
+
     device_ip = str(config.get("ip", "") or "").strip()
     if not device_ip:
         raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
@@ -1377,10 +1387,13 @@ async def sync_clock_attendance(request: Request):
     skipped_duplicates = 0
     inserted_records = 0
     try:
+        print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
+        print("Conexión exitosa")
         await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
+        print(f"Registros encontrados: {detected_records}")
         print(f"[CLOCK_SYNC] Registros detectados por zk.get_attendance(): {detected_records}")
         logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
     except HTTPException:
@@ -1461,7 +1474,9 @@ async def import_clock_users(request: Request):
     imported = 0
     skipped = 0
     try:
+        print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
+        print("Conexión exitosa")
         clock_users = await run_in_threadpool(conn.get_users)
 
         for user in clock_users or []:
@@ -1539,6 +1554,7 @@ def get_allowed_origins() -> List[str]:
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "*",
     })
     return sorted(expanded_origins)
 
@@ -1552,6 +1568,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def global_exception_trace_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        traceback.print_exc()
+        raise
 
 # Configure logging
 logging.basicConfig(
