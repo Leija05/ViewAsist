@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
+import AppLogo from "./components/AppLogo";
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -11,7 +12,8 @@ const ProtectedRoute = ({ children }) => {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-zinc-50">
+      <div className="min-h-screen flex flex-col gap-4 items-center justify-center bg-zinc-50">
+        <AppLogo className="w-16 h-16" animated />
         <div className="loader w-8 h-8" />
       </div>
     );
@@ -30,7 +32,8 @@ const PublicRoute = ({ children }) => {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-zinc-50">
+      <div className="min-h-screen flex flex-col gap-4 items-center justify-center bg-zinc-50">
+        <AppLogo className="w-16 h-16" animated />
         <div className="loader w-8 h-8" />
       </div>
     );

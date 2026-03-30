@@ -165,7 +165,30 @@ code, pre, .mono {
   animation: spin 1s linear infinite;
 }
 
+.app-logo {
+  object-fit: contain;
+  filter: drop-shadow(0 0 0 rgba(24, 24, 27, 0));
+}
+
+.app-logo-float {
+  animation: appLogoFloat 3.2s ease-in-out infinite;
+}
+
+.app-logo-glow {
+  animation: appLogoGlow 2.8s ease-in-out infinite;
+}
+
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
+}
+
+@keyframes appLogoFloat {
+  0%, 100% { transform: translateY(0px) scale(1); }
+  50% { transform: translateY(-5px) scale(1.02); }
+}
+
+@keyframes appLogoGlow {
+  0%, 100% { filter: drop-shadow(0 0 0 rgba(24, 24, 27, 0.06)); }
+  50% { filter: drop-shadow(0 0 14px rgba(24, 24, 27, 0.24)); }
 }

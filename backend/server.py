@@ -977,6 +977,23 @@ def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _safe_parse_int(value: Any, default: int = 0) -> int:
+    try:
+        text = str(value).strip()
+        if text == "":
+            return default
+        return int(text)
+    except Exception:
+        return default
+
+
+def _resolve_clock_user_id(raw_user: Any) -> str:
+    user_id = str(getattr(raw_user, "user_id", "") or "").strip()
+    if user_id:
+        return user_id
+    return str(getattr(raw_user, "uid", "") or "").strip()
+
+
 def _same_subnet(local_ip: str, clock_ip: str, prefix: int = 24) -> bool:
     try:
         local_net = ipaddress.ip_network(f"{local_ip}/{prefix}", strict=False)
@@ -1150,10 +1167,16 @@ async def get_clock_users(request: Request):
 @api_router.post("/clock/users")
 async def create_clock_user(payload: ClockUserBase, request: Request):
     await get_current_user(request)
-    exists = await db.clock_users.find_one({"user_id": payload.user_id})
+    normalized_user_id = payload.user_id.strip()
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="El ID del usuario no puede estar vacío.")
+
+    exists = await db.clock_users.find_one({"user_id": normalized_user_id})
     if exists:
         raise HTTPException(status_code=409, detail="Ya existe un usuario con ese ID")
     doc = payload.model_dump()
+    doc["user_id"] = normalized_user_id
+    doc["uid"] = _safe_parse_int(normalized_user_id, 0)
     doc.update({
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -1200,16 +1223,18 @@ async def pull_users_from_clock(request: Request):
     try:
         users = conn.get_users() or []
         for user in users:
-            user_id = str(getattr(user, "user_id", "")).strip()
+            user_id = _resolve_clock_user_id(user)
             if not user_id:
                 continue
+            privilege_value = _safe_parse_int(getattr(user, "privilege", 0), 0)
             doc = {
                 "user_id": user_id,
                 "name": getattr(user, "name", f"Empleado {user_id}") or f"Empleado {user_id}",
                 "department": "General",
-                "privilege": "admin" if int(getattr(user, "privilege", 0)) > 0 else "empleado",
+                "privilege": "admin" if privilege_value > 0 else "empleado",
                 "password": getattr(user, "password", "") or "",
                 "card_number": str(getattr(user, "card", "") or ""),
+                "uid": _safe_parse_int(getattr(user, "uid", user_id), 0),
                 "fingerprint_registered": True,
                 "face_registered": False,
                 "vein_registered": False,
@@ -1249,8 +1274,15 @@ async def push_users_to_clock(request: Request):
         for user in users:
             try:
                 privilege = 14 if user.get("privilege") == "admin" else 0
+                raw_uid = user.get("uid", user.get("user_id", ""))
+                uid = _safe_parse_int(raw_uid, 0)
+                if uid <= 0:
+                    raise ValueError(
+                        f"El usuario {user.get('user_id', '(sin ID)')} no tiene UID numérico válido. "
+                        "Edita el ID de empleado para que sea numérico o vuelve a importarlo desde el reloj."
+                    )
                 conn.set_user(
-                    uid=int(user["user_id"]),
+                    uid=uid,
                     name=user.get("name", ""),
                     privilege=privilege,
                     password=user.get("password", ""),
