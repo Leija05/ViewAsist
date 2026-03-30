@@ -69,6 +69,65 @@ def get_xlrd_module():
             detail='Falta dependencia opcional "xlrd". Ejecuta: pip install xlrd==2.0.1',
         ) from exc
 
+def get_openpyxl_module():
+    try:
+        import openpyxl
+        return openpyxl
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail='Falta dependencia opcional "openpyxl". Ejecuta: pip install openpyxl',
+        ) from exc
+
+class ExcelSheetAdapter:
+    def __init__(self, sheet_name: str, nrows: int, ncols: int, getter):
+        self.sheet_name = sheet_name
+        self.nrows = nrows
+        self.ncols = ncols
+        self._getter = getter
+
+    def cell_value(self, row_idx: int, col_idx: int):
+        return self._getter(row_idx, col_idx)
+
+class ExcelWorkbookAdapter:
+    def __init__(self, sheet_map: Dict[str, ExcelSheetAdapter]):
+        self._sheet_map = sheet_map
+
+    def sheet_names(self):
+        return list(self._sheet_map.keys())
+
+    def sheet_by_name(self, name: str):
+        return self._sheet_map[name]
+
+def load_excel_workbook(filename: str, content: bytes) -> ExcelWorkbookAdapter:
+    extension = Path(filename or "").suffix.lower()
+
+    if extension == ".xlsx":
+        openpyxl = get_openpyxl_module()
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        sheets = {}
+        for ws in wb.worksheets:
+            sheets[ws.title] = ExcelSheetAdapter(
+                sheet_name=ws.title,
+                nrows=ws.max_row or 0,
+                ncols=ws.max_column or 0,
+                getter=lambda row_idx, col_idx, _ws=ws: (_ws.cell(row=row_idx + 1, column=col_idx + 1).value or "")
+            )
+        return ExcelWorkbookAdapter(sheets)
+
+    xlrd = get_xlrd_module()
+    wb = xlrd.open_workbook(file_contents=content)
+    sheets = {}
+    for sheet_name in wb.sheet_names():
+        sheet = wb.sheet_by_name(sheet_name)
+        sheets[sheet_name] = ExcelSheetAdapter(
+            sheet_name=sheet_name,
+            nrows=sheet.nrows,
+            ncols=sheet.ncols,
+            getter=lambda row_idx, col_idx, _sheet=sheet: _sheet.cell_value(row_idx, col_idx)
+        )
+    return ExcelWorkbookAdapter(sheets)
+
 def get_reportlab_modules():
     try:
         from reportlab.lib import colors
@@ -313,8 +372,7 @@ async def upload_excel(request: Request, file: UploadFile = File(...)):
         tolerance = settings["tolerance_minutes"]
         
         # Parse Excel
-        xlrd = get_xlrd_module()
-        workbook = xlrd.open_workbook(file_contents=content)
+        workbook = load_excel_workbook(file.filename, content)
         
         all_data = {
             "filename": file.filename,
@@ -500,8 +558,7 @@ async def get_excel_preview(report_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         
         content = report["raw_content"]
-        xlrd = get_xlrd_module()
-        workbook = xlrd.open_workbook(file_contents=content)
+        workbook = load_excel_workbook(report.get("filename", ""), content)
         
         sheets_data = {}
         for sheet_name in workbook.sheet_names():
