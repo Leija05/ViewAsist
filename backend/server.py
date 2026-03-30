@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
+from zk import ZK
 from bson import ObjectId
 import os
 import logging
@@ -975,6 +976,33 @@ def _connect_to_clock(config: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {message}")
 
 
+async def get_clock_connection(config: dict):
+    device_ip = str(config.get("ip", "") or "").strip()
+    if not device_ip:
+        raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
+
+    device_port = _safe_parse_int(config.get("port", 4370), 4370)
+    device_password = _safe_parse_int(config.get("password", 0), 0)
+    force_udp = bool(config.get("force_udp", False))
+
+    zk_client = ZK(
+        device_ip,
+        port=device_port,
+        timeout=15,
+        password=device_password,
+        force_udp=force_udp,
+        ommit_ping=False
+    )
+    try:
+        return await run_in_threadpool(zk_client.connect)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}). "
+                   f"Verifica que esté encendido y en la misma red. Error: {exc}"
+        )
+
+
 def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(doc)
     out["_id"] = str(out["_id"])
@@ -1349,32 +1377,7 @@ async def sync_clock_attendance(request: Request):
     skipped_duplicates = 0
     inserted_records = 0
     try:
-        device_ip = str(config.get("ip", "") or "").strip()
-        device_port = _safe_parse_int(config.get("port", 4370), 4370)
-        device_password = _safe_parse_int(config.get("password", 0), 0)
-        force_udp = bool(config.get("force_udp", False))
-
-        if not device_ip:
-            raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
-
-        try:
-            from zk import ZK  # type: ignore
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=f'No se encontró la librería pyzk/zk: {exc}. Instala dependencias con: pip install pyzk'
-            )
-
-        zk_client = ZK(
-            device_ip,
-            port=device_port,
-            timeout=15,
-            password=device_password,
-            force_udp=force_udp,
-            ommit_ping=False
-        )
-
-        conn = await run_in_threadpool(zk_client.connect)
+        conn = await get_clock_connection(config)
         await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
@@ -1442,6 +1445,61 @@ async def sync_clock_attendance(request: Request):
         skipped_duplicates=skipped_duplicates,
         inserted_records=inserted_records,
     )
+
+
+@api_router.post("/clock/users/import")
+async def import_clock_users(request: Request):
+    current_user = await get_current_user(request)
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede importar usuarios del reloj.")
+
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = None
+    imported = 0
+    skipped = 0
+    try:
+        conn = await get_clock_connection(config)
+        clock_users = await run_in_threadpool(conn.get_users)
+
+        for user in clock_users or []:
+            clock_user_id = _resolve_clock_user_id(user)
+            if not clock_user_id:
+                skipped += 1
+                continue
+
+            id_candidates: List[Any] = [clock_user_id]
+            if clock_user_id.isdigit():
+                id_candidates.append(int(clock_user_id))
+
+            existing = await db.employees.find_one({"internal_clock_id": {"$in": id_candidates}}, {"_id": 1})
+            if existing:
+                skipped += 1
+                continue
+
+            await db.employees.insert_one({
+                "employee_id": clock_user_id,
+                "name": getattr(user, "name", f"Empleado {clock_user_id}") or f"Empleado {clock_user_id}",
+                "department": "Reloj checador",
+                "internal_clock_id": clock_user_id,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            })
+            imported += 1
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudieron importar usuarios del reloj: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
+
+    return {"imported": imported, "skipped": skipped}
 
 
 @api_router.get("/clock/events")
