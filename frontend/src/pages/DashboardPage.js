@@ -383,6 +383,14 @@ const DashboardPage = () => {
     }
 
     try {
+      if (nextValue) {
+        await axios.put(`${API_URL}/api/clock/config`, {
+          ...clockConfig,
+          ip: clockConfig.ip.trim(),
+          password: String(clockConfig.password).trim(),
+          port: Number(clockConfig.port)
+        }, { withCredentials: true });
+      }
       await axios.post(`${API_URL}/api/clock/connection`, { connected: nextValue }, { withCredentials: true });
       toast.success(nextValue ? 'Reloj conectado' : 'Reloj desconectado');
       await fetchClockStatus();

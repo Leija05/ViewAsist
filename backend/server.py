@@ -1478,6 +1478,21 @@ async def startup_event():
             "last_sync": None,
             "created_at": datetime.now(timezone.utc)
         })
+    else:
+        legacy_ip = str(clock_config.get("ip", "") or "").strip()
+        legacy_password = str(clock_config.get("password", "") or "").strip()
+        legacy_name = str(clock_config.get("device_name", "") or "").strip()
+        if (
+            not clock_config.get("connected", False)
+            and legacy_ip == "192.168.1.104"
+            and legacy_password in {"123", "1234"}
+            and legacy_name == "Reloj Principal"
+        ):
+            await db.clock_config.update_one(
+                {"_id": clock_config["_id"]},
+                {"$set": {"device_name": "", "ip": "", "password": ""}}
+            )
+            logger.info("Clock config reset from legacy defaults to empty values")
 
     await db.clock_events.create_index("created_at")
     
