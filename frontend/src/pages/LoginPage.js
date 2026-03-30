@@ -5,7 +5,8 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Checkbox } from '../components/ui/checkbox';
-import { Clock, AlertCircle } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
+import AppLogo from '../components/AppLogo';
 
 const formatApiErrorDetail = (detail) => {
   if (detail == null) return "Algo salió mal. Por favor intenta de nuevo.";
@@ -48,8 +49,8 @@ const LoginPage = () => {
           {/* Logo & Title */}
           <div className="text-center">
             <div className="flex items-center justify-center gap-3 mb-6">
-              <div className="w-12 h-12 bg-black flex items-center justify-center">
-                <Clock className="w-7 h-7 text-white" />
+              <div className="w-14 h-14 bg-white border border-zinc-200 flex items-center justify-center shadow-sm">
+                <AppLogo className="w-9 h-9" animated />
               </div>
               <h1 className="text-3xl font-black tracking-tight">ASISTENCIA</h1>
             </div>

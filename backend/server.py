@@ -4,7 +4,9 @@ load_dotenv()
 from fastapi import FastAPI, APIRouter, HTTPException, Request, UploadFile, File, Depends, Response
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
+from zk import ZK
 from bson import ObjectId
 import os
 import logging
@@ -232,6 +234,9 @@ class ClockSyncResponse(BaseModel):
     synced_records: int
     generated_report_id: Optional[str] = None
     message: str
+    detected_records: Optional[int] = 0
+    skipped_duplicates: Optional[int] = 0
+    inserted_records: Optional[int] = 0
 
 class ClockConnectionPayload(BaseModel):
     connected: bool
@@ -971,10 +976,54 @@ def _connect_to_clock(config: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {message}")
 
 
+async def get_clock_connection(config: dict):
+    device_ip = str(config.get("ip", "") or "").strip()
+    if not device_ip:
+        raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
+
+    device_port = _safe_parse_int(config.get("port", 4370), 4370)
+    device_password = _safe_parse_int(config.get("password", 0), 0)
+    force_udp = bool(config.get("force_udp", False))
+
+    zk_client = ZK(
+        device_ip,
+        port=device_port,
+        timeout=15,
+        password=device_password,
+        force_udp=force_udp,
+        ommit_ping=False
+    )
+    try:
+        return await run_in_threadpool(zk_client.connect)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}). "
+                   f"Verifica que esté encendido y en la misma red. Error: {exc}"
+        )
+
+
 def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(doc)
     out["_id"] = str(out["_id"])
     return out
+
+
+def _safe_parse_int(value: Any, default: int = 0) -> int:
+    try:
+        text = str(value).strip()
+        if text == "":
+            return default
+        return int(text)
+    except Exception:
+        return default
+
+
+def _resolve_clock_user_id(raw_user: Any) -> str:
+    user_id = str(getattr(raw_user, "user_id", "") or "").strip()
+    if user_id:
+        return user_id
+    return str(getattr(raw_user, "uid", "") or "").strip()
 
 
 def _same_subnet(local_ip: str, clock_ip: str, prefix: int = 24) -> bool:
@@ -1150,10 +1199,16 @@ async def get_clock_users(request: Request):
 @api_router.post("/clock/users")
 async def create_clock_user(payload: ClockUserBase, request: Request):
     await get_current_user(request)
-    exists = await db.clock_users.find_one({"user_id": payload.user_id})
+    normalized_user_id = payload.user_id.strip()
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="El ID del usuario no puede estar vacío.")
+
+    exists = await db.clock_users.find_one({"user_id": normalized_user_id})
     if exists:
         raise HTTPException(status_code=409, detail="Ya existe un usuario con ese ID")
     doc = payload.model_dump()
+    doc["user_id"] = normalized_user_id
+    doc["uid"] = _safe_parse_int(normalized_user_id, 0)
     doc.update({
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -1200,16 +1255,18 @@ async def pull_users_from_clock(request: Request):
     try:
         users = conn.get_users() or []
         for user in users:
-            user_id = str(getattr(user, "user_id", "")).strip()
+            user_id = _resolve_clock_user_id(user)
             if not user_id:
                 continue
+            privilege_value = _safe_parse_int(getattr(user, "privilege", 0), 0)
             doc = {
                 "user_id": user_id,
                 "name": getattr(user, "name", f"Empleado {user_id}") or f"Empleado {user_id}",
                 "department": "General",
-                "privilege": "admin" if int(getattr(user, "privilege", 0)) > 0 else "empleado",
+                "privilege": "admin" if privilege_value > 0 else "empleado",
                 "password": getattr(user, "password", "") or "",
                 "card_number": str(getattr(user, "card", "") or ""),
+                "uid": _safe_parse_int(getattr(user, "uid", user_id), 0),
                 "fingerprint_registered": True,
                 "face_registered": False,
                 "vein_registered": False,
@@ -1249,8 +1306,15 @@ async def push_users_to_clock(request: Request):
         for user in users:
             try:
                 privilege = 14 if user.get("privilege") == "admin" else 0
+                raw_uid = user.get("uid", user.get("user_id", ""))
+                uid = _safe_parse_int(raw_uid, 0)
+                if uid <= 0:
+                    raise ValueError(
+                        f"El usuario {user.get('user_id', '(sin ID)')} no tiene UID numérico válido. "
+                        "Edita el ID de empleado para que sea numérico o vuelve a importarlo desde el reloj."
+                    )
                 conn.set_user(
-                    uid=int(user["user_id"]),
+                    uid=uid,
                     name=user.get("name", ""),
                     privilege=privilege,
                     password=user.get("password", ""),
@@ -1300,41 +1364,142 @@ async def get_live_attendance(request: Request, limit: int = 100):
 
 @api_router.post("/clock/sync", response_model=ClockSyncResponse)
 async def sync_clock_attendance(request: Request):
-    await get_current_user(request)
+    current_user = await get_current_user(request)
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede sincronizar el reloj.")
 
     config = await db.clock_config.find_one({}, {"_id": 0})
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    settings = await db.settings.find_one({}, {"_id": 0}) or {"entry_time": "09:00", "tolerance_minutes": 30, "work_hours": 9}
-    data = _fetch_clock_attendance(config)
+    conn = None
+    detected_records = 0
+    skipped_duplicates = 0
+    inserted_records = 0
+    try:
+        conn = await get_clock_connection(config)
+        await run_in_threadpool(conn.set_time, datetime.now())
+        attendance = await run_in_threadpool(conn.get_attendance)
+        detected_records = len(attendance or [])
+        print(f"[CLOCK_SYNC] Registros detectados por zk.get_attendance(): {detected_records}")
+        logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo sincronizar con el reloj: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
 
-    await db.clock_events.insert_one({
-        "source": "clock_device",
-        "device": {"ip": config.get("ip"), "port": config.get("port"), "device_name": config.get("device_name")},
-        "events": data["records"],
-        "created_at": datetime.now(timezone.utc),
-    })
+    for item in attendance or []:
+        timestamp = getattr(item, "timestamp", None)
+        clock_user_id = str(getattr(item, "user_id", "") or "").strip()
+        if not clock_user_id or not isinstance(timestamp, datetime):
+            continue
 
-    summary = _summarize_clock_records(data["records"], settings, data.get("users"))
-    report_doc = {
-        "filename": f"SYNC_RELOJ_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-        "upload_date": datetime.now(timezone.utc),
-        "source": "clock_sync",
-        "sheets": ["Reloj checador"],
-        "employees": summary["employees"],
-        "attendance_records": summary["attendance_records"],
-        "statistics": summary["statistics"],
-    }
-    report_result = await db.reports.insert_one(report_doc)
+        id_candidates: List[Any] = [clock_user_id]
+        if clock_user_id.isdigit():
+            id_candidates.append(int(clock_user_id))
+        employee_doc = await db.employees.find_one(
+            {"internal_clock_id": {"$in": id_candidates}},
+            {"employee_id": 1}
+        )
+        if not employee_doc:
+            print(f"ID del reloj {clock_user_id} no encontrado en la base de datos")
+            logger.info("ID del reloj %s no encontrado en la base de datos", clock_user_id)
+            continue
 
-    await db.clock_config.update_one({}, {"$set": {"last_sync": datetime.now(timezone.utc)}}, upsert=True)
+        employee_id = str(employee_doc.get("employee_id", "") or "").strip()
+        if not employee_id:
+            continue
+
+        record = {
+            "employee_id": employee_id,
+            "timestamp": timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
+            "type": str(getattr(item, "status", getattr(item, "punch", 0))),
+        }
+        exists = await db.attendance_records.find_one(
+            {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
+            {"_id": 1}
+        )
+        if exists:
+            skipped_duplicates += 1
+            continue
+        await db.attendance_records.insert_one(record)
+        inserted_records += 1
+
+    await db.clock_config.update_one(
+        {},
+        {"$set": {"connected": True, "last_sync": datetime.now(timezone.utc)}},
+        upsert=True
+    )
 
     return ClockSyncResponse(
-        synced_records=len(summary["attendance_records"]),
-        generated_report_id=str(report_result.inserted_id),
+        synced_records=inserted_records,
+        generated_report_id=None,
         message="Sincronización completada desde el reloj checador",
+        detected_records=detected_records,
+        skipped_duplicates=skipped_duplicates,
+        inserted_records=inserted_records,
     )
+
+
+@api_router.post("/clock/users/import")
+async def import_clock_users(request: Request):
+    current_user = await get_current_user(request)
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede importar usuarios del reloj.")
+
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = None
+    imported = 0
+    skipped = 0
+    try:
+        conn = await get_clock_connection(config)
+        clock_users = await run_in_threadpool(conn.get_users)
+
+        for user in clock_users or []:
+            clock_user_id = _resolve_clock_user_id(user)
+            if not clock_user_id:
+                skipped += 1
+                continue
+
+            id_candidates: List[Any] = [clock_user_id]
+            if clock_user_id.isdigit():
+                id_candidates.append(int(clock_user_id))
+
+            existing = await db.employees.find_one({"internal_clock_id": {"$in": id_candidates}}, {"_id": 1})
+            if existing:
+                skipped += 1
+                continue
+
+            await db.employees.insert_one({
+                "employee_id": clock_user_id,
+                "name": getattr(user, "name", f"Empleado {clock_user_id}") or f"Empleado {clock_user_id}",
+                "department": "Reloj checador",
+                "internal_clock_id": clock_user_id,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            })
+            imported += 1
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudieron importar usuarios del reloj: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
+
+    return {"imported": imported, "skipped": skipped}
 
 
 @api_router.get("/clock/events")
