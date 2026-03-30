@@ -43,7 +43,7 @@ const LoginPage = () => {
   return (
     <div className="min-h-screen flex">
       {/* Left Panel - Login Form */}
-      <div className="w-full lg:w-1/2 flex items-center justify-center p-8 bg-white">
+      <div className="w-full lg:w-1/2 flex items-center justify-center p-8 bg-white text-zinc-900">
         <div className="w-full max-w-md space-y-8">
           {/* Logo & Title */}
           <div className="text-center">

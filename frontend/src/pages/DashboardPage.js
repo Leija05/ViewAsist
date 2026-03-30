@@ -705,7 +705,7 @@ const DashboardPage = () => {
                         Probar Conexión
                       </Button>
                     </div>
-                    <Button className="w-full bg-black hover:bg-zinc-800" onClick={handleSyncFromClock}>
+                    <Button className="w-full bg-black hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300" onClick={handleSyncFromClock}>
                       Sincronizar Asistencias del Reloj
                     </Button>
                     {clockConfig.last_sync && (
@@ -750,7 +750,7 @@ const DashboardPage = () => {
                       </div>
                     )}
                   </div>
-                  <Button onClick={handleSaveSettings} data-testid="save-settings-button" className="w-full bg-black hover:bg-zinc-800">
+                  <Button onClick={handleSaveSettings} data-testid="save-settings-button" className="w-full bg-black hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
                     Guardar Configuración
                   </Button>
                 </div>
@@ -1126,8 +1126,8 @@ const DashboardPage = () => {
 
         {/* Excel Preview Panel */}
         {showExcelPanel && excelPreview && (
-          <aside className="lg:col-span-4 border-l border-zinc-200 bg-zinc-50 sticky top-16 h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-zinc-200 bg-white flex items-center justify-between">
+          <aside className="lg:col-span-4 border-l border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 sticky top-16 h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
+            <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 flex items-center justify-between">
               <div>
                 <h3 className="font-semibold text-sm">Vista Previa Excel</h3>
                 <p className="text-xs text-zinc-500 truncate">{excelPreview.filename}</p>
@@ -1138,7 +1138,7 @@ const DashboardPage = () => {
             </div>
 
             {/* Sheet Tabs */}
-            <div className="border-b border-zinc-200 bg-white">
+            <div className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
               <ScrollArea className="w-full" orientation="horizontal">
                 <div className="flex p-2 gap-1">
                   {Object.keys(excelPreview.sheets).map((sheetName) => (
@@ -1148,8 +1148,8 @@ const DashboardPage = () => {
                       data-testid={`sheet-tab-${sheetName}`}
                       className={`px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors ${
                         selectedSheet === sheetName
-                          ? 'bg-black text-white'
-                          : 'bg-zinc-100 hover:bg-zinc-200'
+                          ? 'bg-black text-white dark:bg-zinc-100 dark:text-zinc-900'
+                          : 'bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
                       }`}
                     >
                       {sheetName}
@@ -1166,7 +1166,7 @@ const DashboardPage = () => {
                   <table className="excel-preview-table w-max min-w-full">
                     <tbody>
                       {excelPreview.sheets[selectedSheet].map((row, rowIdx) => (
-                        <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 font-semibold' : rowIdx % 2 === 0 ? 'bg-white' : 'bg-zinc-50'}>
+                        <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 dark:bg-zinc-800 font-semibold' : rowIdx % 2 === 0 ? 'bg-white dark:bg-zinc-950' : 'bg-zinc-50 dark:bg-zinc-900'}>
                           {row.map((cell, colIdx) => (
                             <td key={colIdx} title={cell}>
                               {cell}

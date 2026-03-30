@@ -152,6 +152,7 @@ code, pre, .mono {
   border: 1px solid hsl(var(--border));
   white-space: nowrap;
   max-width: none;
+  color: hsl(var(--foreground));
 }
 
 /* Loader */
