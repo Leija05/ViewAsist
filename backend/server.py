@@ -4,6 +4,7 @@ load_dotenv()
 from fastapi import FastAPI, APIRouter, HTTPException, Request, UploadFile, File, Depends, Response
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
@@ -1332,39 +1333,62 @@ async def get_live_attendance(request: Request, limit: int = 100):
 
 @api_router.post("/clock/sync", response_model=ClockSyncResponse)
 async def sync_clock_attendance(request: Request):
-    await get_current_user(request)
+    current_user = await get_current_user(request)
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede sincronizar el reloj.")
 
     config = await db.clock_config.find_one({}, {"_id": 0})
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    settings = await db.settings.find_one({}, {"_id": 0}) or {"entry_time": "09:00", "tolerance_minutes": 30, "work_hours": 9}
-    data = _fetch_clock_attendance(config)
+    conn = None
+    try:
+        conn = await run_in_threadpool(_connect_to_clock, config)
+        await run_in_threadpool(conn.set_time, datetime.now())
+        attendance = await run_in_threadpool(conn.get_attendance)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo sincronizar con el reloj: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
 
-    await db.clock_events.insert_one({
-        "source": "clock_device",
-        "device": {"ip": config.get("ip"), "port": config.get("port"), "device_name": config.get("device_name")},
-        "events": data["records"],
-        "created_at": datetime.now(timezone.utc),
-    })
+    normalized_records = []
+    for item in attendance or []:
+        timestamp = getattr(item, "timestamp", None)
+        employee_id = str(getattr(item, "user_id", "") or "").strip()
+        if not employee_id or not isinstance(timestamp, datetime):
+            continue
+        normalized_records.append({
+            "employee_id": employee_id,
+            "timestamp": timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
+            "type": str(getattr(item, "status", getattr(item, "punch", 0))),
+        })
 
-    summary = _summarize_clock_records(data["records"], settings, data.get("users"))
-    report_doc = {
-        "filename": f"SYNC_RELOJ_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-        "upload_date": datetime.now(timezone.utc),
-        "source": "clock_sync",
-        "sheets": ["Reloj checador"],
-        "employees": summary["employees"],
-        "attendance_records": summary["attendance_records"],
-        "statistics": summary["statistics"],
-    }
-    report_result = await db.reports.insert_one(report_doc)
+    synced_records = 0
+    for record in normalized_records:
+        exists = await db.attendance_records.find_one(
+            {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
+            {"_id": 1}
+        )
+        if exists:
+            continue
+        await db.attendance_records.insert_one(record)
+        synced_records += 1
 
-    await db.clock_config.update_one({}, {"$set": {"last_sync": datetime.now(timezone.utc)}}, upsert=True)
+    await db.clock_config.update_one(
+        {},
+        {"$set": {"connected": True, "last_sync": datetime.now(timezone.utc)}},
+        upsert=True
+    )
 
     return ClockSyncResponse(
-        synced_records=len(summary["attendance_records"]),
-        generated_report_id=str(report_result.inserted_id),
+        synced_records=synced_records,
+        generated_report_id=None,
         message="Sincronización completada desde el reloj checador",
     )
 
