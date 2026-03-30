@@ -186,9 +186,19 @@ const DashboardPage = () => {
   const fetchClockUsers = useCallback(async () => {
     try {
       const response = await axios.get(`${API_URL}/api/clock/users`, { withCredentials: true });
-      setClockUsers(response.data);
+      const payload = response.data;
+      if (Array.isArray(payload)) {
+        setClockUsers(payload);
+        return;
+      }
+      if (Array.isArray(payload?.users)) {
+        setClockUsers(payload.users);
+        return;
+      }
+      setClockUsers([]);
     } catch (error) {
       console.error('Error fetching clock users:', error);
+      setClockUsers([]);
     }
   }, []);
 
@@ -553,11 +563,11 @@ const DashboardPage = () => {
   ].filter(d => d.value > 0);
 
   return (
-    <div className="min-h-screen bg-white dark:bg-zinc-950 dark:text-zinc-100 transition-colors">
+    <div className="min-h-screen bg-white dark:bg-zinc-900 dark:text-zinc-100 transition-colors">
       <Toaster position="top-right" toastOptions={{ className: 'max-w-[420px] break-words' }} />
       
       {/* Top Navigation */}
-      <header className="sticky top-0 z-50 bg-white/70 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800">
+      <header className="sticky top-0 z-50 bg-white/70 dark:bg-zinc-900/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800">
         <div className="px-4 md:px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-black flex items-center justify-center">
@@ -835,7 +845,7 @@ const DashboardPage = () => {
                 />
               </div>
 
-              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4 space-y-4">
+              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-widest">Centro de Reloj Checador</h3>
                   <Badge className={clockStatus?.connected ? 'bg-green-100 text-green-700' : 'bg-zinc-100 text-zinc-700'}>
@@ -930,7 +940,7 @@ const DashboardPage = () => {
               {/* Charts */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* Bar Chart */}
-                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4">
+                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-widest mb-4">Faltas y Retardos por Empleado</h3>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
@@ -947,7 +957,7 @@ const DashboardPage = () => {
                 </div>
 
                 {/* Pie Chart */}
-                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4">
+                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-widest mb-4">Distribución General</h3>
                   <div className="h-64 flex items-center justify-center">
                     <ResponsiveContainer width="100%" height="100%">
@@ -982,7 +992,7 @@ const DashboardPage = () => {
 
               {/* Alerts */}
               {alerts.length > 0 && (
-                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4">
+                <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-widest mb-4 flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 text-yellow-500" />
                     Alertas de Asistencia
@@ -1010,7 +1020,7 @@ const DashboardPage = () => {
               )}
 
               {/* Employees Table */}
-              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
+              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
                 <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-widest">Resumen de Empleados</h3>
                   {dashboardData?.report_id && (
@@ -1086,7 +1096,7 @@ const DashboardPage = () => {
               </div>
 
               {/* Reports History */}
-              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
+              <div className="border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
                 <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
                   <h3 className="text-sm font-semibold uppercase tracking-widest">Historial de Reportes</h3>
                 </div>
@@ -1149,8 +1159,8 @@ const DashboardPage = () => {
 
         {/* Excel Preview Panel */}
         {showExcelPanel && excelPreview && (
-          <aside className="lg:col-span-4 border-l border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 sticky top-16 h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 flex items-center justify-between">
+          <aside className="lg:col-span-4 border-l border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 sticky top-16 h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
+            <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex items-center justify-between">
               <div>
                 <h3 className="font-semibold text-sm">Vista Previa Excel</h3>
                 <p className="text-xs text-zinc-500 truncate">{excelPreview.filename}</p>
@@ -1161,7 +1171,7 @@ const DashboardPage = () => {
             </div>
 
             {/* Sheet Tabs */}
-            <div className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950">
+            <div className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
               <ScrollArea className="w-full" orientation="horizontal">
                 <div className="flex p-2 gap-1">
                   {Object.keys(excelPreview.sheets).map((sheetName) => (
@@ -1189,7 +1199,7 @@ const DashboardPage = () => {
                   <table className="excel-preview-table w-max min-w-full">
                     <tbody>
                       {excelPreview.sheets[selectedSheet].map((row, rowIdx) => (
-                        <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 dark:bg-zinc-800 font-semibold' : rowIdx % 2 === 0 ? 'bg-white dark:bg-zinc-950' : 'bg-zinc-50 dark:bg-zinc-900'}>
+                        <tr key={rowIdx} className={rowIdx === 0 ? 'bg-zinc-200 dark:bg-zinc-800 font-semibold' : rowIdx % 2 === 0 ? 'bg-white dark:bg-zinc-900' : 'bg-zinc-50 dark:bg-zinc-900'}>
                           {row.map((cell, colIdx) => (
                             <td key={colIdx} title={cell}>
                               {cell}

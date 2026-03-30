@@ -1187,7 +1187,7 @@ async def get_clock_users(request: Request):
             pass
 
     users_payload.sort(key=lambda item: item["user_id"])
-    return {"users": users_payload, "count": len(users_payload)}
+    return users_payload
 
 
 @api_router.post("/clock/users")
