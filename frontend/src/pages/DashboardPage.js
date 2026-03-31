@@ -544,11 +544,22 @@ const DashboardPage = () => {
       return;
     }
     try {
-      const query = new URLSearchParams({
-        start_date: reportFilter.start_date,
-        end_date: reportFilter.end_date,
-      }).toString();
-      window.open(`${API_URL}/api/reports/csv?${query}`, '_blank', 'noopener,noreferrer');
+      const response = await axios.get(`${API_URL}/api/reports/csv`, {
+        withCredentials: true,
+        responseType: 'blob',
+        params: {
+          start_date: reportFilter.start_date,
+          end_date: reportFilter.end_date
+        }
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `reporte_historico_${reportFilter.start_date}_${reportFilter.end_date}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
       toast.success('Reporte histórico descargado');
     } catch (error) {
       toast.error(error.response?.data?.detail || 'No se pudo descargar el reporte histórico');

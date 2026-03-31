@@ -586,6 +586,12 @@ async def get_reports(request: Request):
 @api_router.get("/reports/{report_id}")
 async def get_report(report_id: str, request: Request):
     await get_current_user(request)
+    if report_id in {"csv", "export"}:
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        if not start_date or not end_date:
+            raise HTTPException(status_code=400, detail="Debes enviar start_date y end_date en formato YYYY-MM-DD.")
+        return await export_clock_events_csv(request=request, start_date=start_date, end_date=end_date)
     try:
         report = await db.reports.find_one({"_id": ObjectId(report_id)}, {"raw_content": 0})
         if not report:
