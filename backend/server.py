@@ -1381,6 +1381,11 @@ async def push_users_to_clock(request: Request):
     errors = []
 
     try:
+        try:
+            conn.disable_device()
+        except Exception as exc:
+            logger.warning("No se pudo deshabilitar el reloj antes del push de usuarios: %s", exc)
+
         for user in users:
             try:
                 privilege = 14 if user.get("privilege") == "admin" else 0
@@ -1405,6 +1410,14 @@ async def push_users_to_clock(request: Request):
                 )
                 pushed += 1
             except Exception as exc:
+                logger.exception(
+                    "[CLOCK_USERS_PUSH] Error al subir usuario al reloj | user_id=%s | uid=%s | nombre=%s | privilegio=%s | error=%s",
+                    user.get("user_id"),
+                    user.get("uid", user.get("user_id")),
+                    user.get("name", ""),
+                    user.get("privilege", "empleado"),
+                    exc,
+                )
                 errors.append({"user_id": user.get("user_id"), "error": str(exc)})
                 await db.clock_users.update_one(
                     {"_id": user["_id"]},
