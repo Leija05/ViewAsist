@@ -106,6 +106,7 @@ const DashboardPage = () => {
     end_date: ''
   });
   const [attSettings, setAttSettings] = useState([{ numero: 1, entrada: '09:00', salida: '18:00', tiempo_extra: 0 }]);
+  const [usbData, setUsbData] = useState(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -640,6 +641,25 @@ const DashboardPage = () => {
     }
   };
 
+  const handleUsbLoad = async (event, type) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append(type, file);
+    try {
+      const response = await axios.post(`${API_URL}/api/usb/load`, formData, {
+        withCredentials: true,
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      setUsbData(response.data);
+      toast.success('Archivo USB cargado');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'No se pudo leer el archivo USB');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
   const handleCheckUpdates = async () => {
     setCheckingUpdates(true);
     try {
@@ -1145,6 +1165,39 @@ const DashboardPage = () => {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-0">
         {/* Main Dashboard */}
         <main className={`${showExcelPanel ? 'lg:col-span-8' : 'lg:col-span-12'} p-4 md:p-6 space-y-6`}>
+          <div className="border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/70 backdrop-blur p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Modo USB-First</p>
+                <p className="text-xs text-zinc-500">Carga *StandardReport.xls y *AttSetting.xls para editar desde la app.</p>
+              </div>
+              <div className="flex gap-2">
+                <label className="cursor-pointer">
+                  <input type="file" className="hidden" accept=".xls,.xlsx" onChange={(e) => handleUsbLoad(e, 'standard_report')} />
+                  <span className="px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-700 inline-block">Cargar StandardReport</span>
+                </label>
+                <label className="cursor-pointer">
+                  <input type="file" className="hidden" accept=".xls,.xlsx" onChange={(e) => handleUsbLoad(e, 'attsettings')} />
+                  <span className="px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-700 inline-block">Cargar AttSetting</span>
+                </label>
+              </div>
+            </div>
+            {usbData?.standard_report && (
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                {(usbData.standard_report.employees || []).slice(0, 6).map((emp) => (
+                  <div key={emp.employee_id} className="border border-zinc-200 dark:border-zinc-700 p-3 text-sm">
+                    <p className="font-semibold">{emp.name || `ID ${emp.employee_id}`}</p>
+                    <p className="text-xs text-zinc-500">{emp.department || 'General'}</p>
+                    <div className="mt-2 flex gap-2 text-xs">
+                      <Badge variant="destructive">Faltas: {emp.absences || 0}</Badge>
+                      <Badge className="bg-yellow-500 text-black">Retardos: {emp.delays || 0}</Badge>
+                      <Badge variant="secondary">Asistencias: {emp.assistances || 0}</Badge>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           {/* Stats Cards */}
           {dashboardData?.has_data ? (
             <>
