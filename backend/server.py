@@ -14,6 +14,7 @@ import bcrypt
 import jwt
 import io
 import csv
+import json
 import secrets
 import socket
 import ipaddress
@@ -250,6 +251,14 @@ class ClockSyncResponse(BaseModel):
 
 class ClockConnectionPayload(BaseModel):
     connected: bool
+
+
+class ClockConfigImportPayload(BaseModel):
+    device_name: str = "Reloj Principal"
+    ip: str
+    port: int = 4370
+    password: str = ""
+    rules: List[AttendanceRule] = Field(default_factory=list)
 
 class ClockUserBase(BaseModel):
     user_id: str
@@ -788,8 +797,20 @@ async def export_pdf(report_id: str, request: Request):
 
 
 @api_router.get("/reports/export")
-async def export_clock_events_csv(request: Request):
+async def export_clock_events_csv(
+    request: Request,
+    start_date: str,
+    end_date: str,
+):
     await get_current_user(request)
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usa YYYY-MM-DD.")
+    if end_dt < start_dt:
+        raise HTTPException(status_code=400, detail="end_date no puede ser menor que start_date.")
 
     users = await db.clock_users.find({}, {"user_id": 1, "name": 1}).to_list(5000)
     user_name_by_id = {
@@ -798,11 +819,11 @@ async def export_clock_events_csv(request: Request):
         if str(u.get("user_id", "")).strip()
     }
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Nombre del empleado", "Fecha", "Hora de entrada", "Estatus"])
+    daily_rows: Dict[tuple, Dict[str, Any]] = {}
+    start_day = start_dt.date()
+    end_day = end_dt.date()
 
-    docs = await db.clock_events.find({}, {"events": 1}).sort("created_at", -1).to_list(2000)
+    docs = await db.clock_events.find({}, {"events": 1}).sort("created_at", -1).to_list(5000)
     for doc in docs:
         for event in doc.get("events", []):
             raw_user_id = str(
@@ -811,11 +832,9 @@ async def export_clock_events_csv(request: Request):
                 or event.get("user_id")
                 or ""
             ).strip()
-            employee_name = (
-                event.get("employee_name")
-                or user_name_by_id.get(raw_user_id)
-                or f"ID Reloj: {raw_user_id or 'Desconocido'}"
-            )
+            if not raw_user_id:
+                continue
+
             raw_timestamp = event.get("timestamp")
             if isinstance(raw_timestamp, datetime):
                 event_dt = raw_timestamp
@@ -823,26 +842,52 @@ async def export_clock_events_csv(request: Request):
                 try:
                     event_dt = datetime.fromisoformat(str(raw_timestamp))
                 except Exception:
-                    event_dt = None
+                    continue
 
-            if event_dt:
-                event_date = event_dt.strftime("%Y-%m-%d")
-                event_time = event_dt.strftime("%H:%M:%S")
+            event_day = event_dt.date()
+            if event_day < start_day or event_day > end_day:
+                continue
+
+            key = (raw_user_id, event_day.isoformat())
+            current = daily_rows.get(key)
+            if not current:
+                current = {
+                    "employee_id": raw_user_id,
+                    "name": user_name_by_id.get(raw_user_id) or event.get("employee_name") or f"ID Reloj: {raw_user_id}",
+                    "date": event_day.isoformat(),
+                    "entry": event_dt,
+                    "exit": event_dt,
+                    "delay_minutes": float(event.get("delay_minutes", 0) or 0),
+                }
+                daily_rows[key] = current
             else:
-                event_date = ""
-                event_time = str(raw_timestamp or "")
+                if event_dt < current["entry"]:
+                    current["entry"] = event_dt
+                if event_dt > current["exit"]:
+                    current["exit"] = event_dt
+                current["delay_minutes"] = max(current["delay_minutes"], float(event.get("delay_minutes", 0) or 0))
 
-            raw_status = str(event.get("status", "") or "").strip().upper()
-            status = "Retardo" if raw_status == "RETARDO" else "Asistencia"
-            writer.writerow([employee_name, event_date, event_time, status])
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Nombre", "Fecha", "Entrada", "Salida", "Retardos"])
+    for row in sorted(daily_rows.values(), key=lambda r: (r["date"], r["employee_id"])):
+        writer.writerow([
+            row["employee_id"],
+            row["name"],
+            row["date"],
+            row["entry"].strftime("%H:%M:%S"),
+            row["exit"].strftime("%H:%M:%S"),
+            round(row["delay_minutes"], 2),
+        ])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
     output.close()
 
+    filename = f"reporte_historico_{start_day.isoformat()}_{end_day.isoformat()}.csv"
     return StreamingResponse(
         io.BytesIO(csv_bytes),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=reporte_asistencia.csv"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 # Dashboard Stats
@@ -1201,6 +1246,18 @@ async def get_clock_config(request: Request):
     return config
 
 
+@api_router.get("/clock/config/export")
+async def export_clock_config(request: Request):
+    await get_current_user(request)
+    config = await db.clock_config.find_one({}, {"_id": 0}) or {}
+    payload = json.dumps(config, ensure_ascii=False, default=str, indent=2).encode("utf-8")
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=clock_config.json"},
+    )
+
+
 @api_router.put("/clock/config")
 async def update_clock_config(payload: ClockConfigUpdate, request: Request):
     await get_current_user(request)
@@ -1208,6 +1265,31 @@ async def update_clock_config(payload: ClockConfigUpdate, request: Request):
     data["updated_at"] = datetime.now(timezone.utc)
     await db.clock_config.update_one({}, {"$set": data}, upsert=True)
     return data
+
+
+@api_router.post("/clock/config/import")
+async def import_clock_config(payload: ClockConfigImportPayload, request: Request):
+    await get_current_user(request)
+    config_data = payload.model_dump()
+    config_data["updated_at"] = datetime.now(timezone.utc)
+
+    # Aplicar y validar los cambios de conexión de forma inmediata.
+    conn = _connect_to_clock(config_data)
+    try:
+        conn.disable_device()
+    finally:
+        try:
+            conn.enable_device()
+        except Exception:
+            pass
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
+    config_data["connected"] = True
+    await db.clock_config.update_one({}, {"$set": config_data}, upsert=True)
+    return {"message": "Configuración importada y aplicada", "config": config_data}
 
 
 @api_router.post("/clock/test-connection")
@@ -1436,7 +1518,7 @@ async def push_users_to_clock(request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    users = await db.clock_users.find({}).to_list(2000)
+    users = await db.clock_users.find({"sync_status": {"$ne": "sincronizado"}}).to_list(2000)
     conn = _connect_to_clock(config)
     pushed = 0
     errors = []
@@ -1468,7 +1550,7 @@ async def push_users_to_clock(request: Request):
                 )
                 await db.clock_users.update_one(
                     {"_id": user["_id"]},
-                    {"$set": {"sync_status": "synced", "synced_at": datetime.now(timezone.utc)}}
+                    {"$set": {"sync_status": "sincronizado", "synced_at": datetime.now(timezone.utc), "last_error": None}}
                 )
                 pushed += 1
             except Exception as exc:
