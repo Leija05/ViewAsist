@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
 import logging
+import asyncio
 import bcrypt
 import jwt
 import io
@@ -995,34 +996,53 @@ async def get_clock_connection(config: dict):
     device_password = _safe_parse_int(config.get("password", 0), 0)
     force_udp = True
 
-    zk_client = ZK(
-        device_ip,
-        port=device_port,
-        timeout=15,
-        password=device_password,
-        force_udp=force_udp,
-        ommit_ping=False
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            socket.setdefaulttimeout(30)
+            print(f"Intentando apertura de puerto 4370 UDP hacia {device_ip}....")
+            zk_client = ZK(
+                device_ip,
+                port=device_port,
+                timeout=30,
+                password=device_password,
+                force_udp=force_udp,
+                ommit_ping=True
+            )
+            conn = await run_in_threadpool(zk_client.connect)
+
+            # Limpieza/activación de sesión para evitar buffers colgados.
+            try:
+                if hasattr(conn, "free_data"):
+                    await run_in_threadpool(conn.free_data)
+                if hasattr(conn, "test_voice"):
+                    await run_in_threadpool(conn.test_voice)
+            except Exception as session_exc:
+                print(f"[CLOCK_SYNC] Aviso limpiando sesión previa: {session_exc}")
+
+            try:
+                before_time = await run_in_threadpool(conn.get_time)
+                print(f"[CLOCK_SYNC] Hora del reloj antes de sync: {before_time}")
+            except Exception as time_exc:
+                print(f"[CLOCK_SYNC] No se pudo leer hora antes de sync: {time_exc}")
+            await run_in_threadpool(conn.set_time, datetime.now())
+            try:
+                after_time = await run_in_threadpool(conn.get_time)
+                print(f"[CLOCK_SYNC] Hora del reloj después de sync: {after_time}")
+            except Exception as time_exc:
+                print(f"[CLOCK_SYNC] No se pudo leer hora después de sync: {time_exc}")
+            return conn
+        except Exception as exc:
+            last_error = exc
+            print(f"[CLOCK_SYNC] Intento {attempt}/3 fallido: {exc}")
+            if attempt < 3:
+                await asyncio.sleep(2)
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}) tras 3 intentos. "
+               f"Verifica red/puerto/comm key. Último error: {last_error}"
     )
-    try:
-        conn = await run_in_threadpool(zk_client.connect)
-        try:
-            before_time = await run_in_threadpool(conn.get_time)
-            print(f"[CLOCK_SYNC] Hora del reloj antes de sync: {before_time}")
-        except Exception as time_exc:
-            print(f"[CLOCK_SYNC] No se pudo leer hora antes de sync: {time_exc}")
-        await run_in_threadpool(conn.set_time, datetime.now())
-        try:
-            after_time = await run_in_threadpool(conn.get_time)
-            print(f"[CLOCK_SYNC] Hora del reloj después de sync: {after_time}")
-        except Exception as time_exc:
-            print(f"[CLOCK_SYNC] No se pudo leer hora después de sync: {time_exc}")
-        return conn
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}). "
-                   f"Verifica que esté encendido y en la misma red. Error: {exc}"
-        )
 
 
 def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
