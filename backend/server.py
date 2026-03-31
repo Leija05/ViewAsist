@@ -13,6 +13,7 @@ import asyncio
 import bcrypt
 import jwt
 import io
+import csv
 import secrets
 import socket
 import ipaddress
@@ -785,6 +786,65 @@ async def export_pdf(report_id: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generando PDF: {str(e)}")
 
+
+@api_router.get("/reports/export")
+async def export_clock_events_csv(request: Request):
+    await get_current_user(request)
+
+    users = await db.clock_users.find({}, {"user_id": 1, "name": 1}).to_list(5000)
+    user_name_by_id = {
+        str(u.get("user_id", "")).strip(): str(u.get("name", "")).strip() or f"ID {u.get('user_id', '')}"
+        for u in users
+        if str(u.get("user_id", "")).strip()
+    }
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Nombre del empleado", "Fecha", "Hora de entrada", "Estatus"])
+
+    docs = await db.clock_events.find({}, {"events": 1}).sort("created_at", -1).to_list(2000)
+    for doc in docs:
+        for event in doc.get("events", []):
+            raw_user_id = str(
+                event.get("clock_user_id")
+                or event.get("employee_id")
+                or event.get("user_id")
+                or ""
+            ).strip()
+            employee_name = (
+                event.get("employee_name")
+                or user_name_by_id.get(raw_user_id)
+                or f"ID Reloj: {raw_user_id or 'Desconocido'}"
+            )
+            raw_timestamp = event.get("timestamp")
+            if isinstance(raw_timestamp, datetime):
+                event_dt = raw_timestamp
+            else:
+                try:
+                    event_dt = datetime.fromisoformat(str(raw_timestamp))
+                except Exception:
+                    event_dt = None
+
+            if event_dt:
+                event_date = event_dt.strftime("%Y-%m-%d")
+                event_time = event_dt.strftime("%H:%M:%S")
+            else:
+                event_date = ""
+                event_time = str(raw_timestamp or "")
+
+            raw_status = str(event.get("status", "") or "").strip().upper()
+            status = "Retardo" if raw_status == "RETARDO" else "Asistencia"
+            writer.writerow([employee_name, event_date, event_time, status])
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    output.close()
+
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=reporte_asistencia.csv"},
+    )
+
 # Dashboard Stats
 @api_router.get("/dashboard/stats")
 async def get_dashboard_stats(request: Request):
@@ -1016,7 +1076,7 @@ def _connect_to_clock(config: Dict[str, Any]):
     except Exception:
         raise HTTPException(status_code=400, detail="La Contraseña/Comm Key debe ser numérica.")
 
-    zk_client = ZK(device_ip, port=device_port, timeout=8, password=1234, force_udp=False, ommit_ping=False)
+    zk_client = ZK(device_ip, port=device_port, timeout=10, password=device_password, force_udp=False, ommit_ping=True)
     try:
         return zk_client.connect()
     except Exception as exc:
@@ -1028,6 +1088,8 @@ def _connect_to_clock(config: Dict[str, Any]):
             )
         if "timed out" in message.lower() or "timeout" in message.lower():
             raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al conectar con el reloj: {message}")
+        if exc.__class__.__name__ == "ZKNetworkError":
+            raise HTTPException(status_code=503, detail=f"Error de red al conectar con el reloj: {message}")
         raise HTTPException(status_code=503, detail=f"No se pudo conectar al reloj: {message}")
 
 
@@ -1051,34 +1113,13 @@ async def get_clock_connection(config: dict):
             zk_client = ZK(
                 device_ip,
                 port=device_port,
-                timeout=8,
+                timeout=10,
                 password=device_password,
                 force_udp=force_udp,
                 ommit_ping=True
             )
             conn = await run_in_threadpool(zk_client.connect)
-            await run_in_threadpool(conn.set_time, datetime.now())
-
-            # Limpieza/activación de sesión para evitar buffers colgados.
-            try:
-                if hasattr(conn, "free_data"):
-                    await run_in_threadpool(conn.free_data)
-                if hasattr(conn, "test_voice"):
-                    await run_in_threadpool(conn.test_voice)
-            except Exception as session_exc:
-                print(f"[CLOCK_SYNC] Aviso limpiando sesión previa: {session_exc}")
-
-            try:
-                before_time = await run_in_threadpool(conn.get_time)
-                print(f"[CLOCK_SYNC] Hora del reloj antes de sync: {before_time}")
-            except Exception as time_exc:
-                print(f"[CLOCK_SYNC] No se pudo leer hora antes de sync: {time_exc}")
-            await run_in_threadpool(conn.set_time, datetime.now())
-            try:
-                after_time = await run_in_threadpool(conn.get_time)
-                print(f"[CLOCK_SYNC] Hora del reloj después de sync: {after_time}")
-            except Exception as time_exc:
-                print(f"[CLOCK_SYNC] No se pudo leer hora después de sync: {time_exc}")
+            await run_in_threadpool(conn.disable_device)
             return conn
         except Exception as exc:
             last_error = exc
@@ -1401,6 +1442,10 @@ async def push_users_to_clock(request: Request):
     errors = []
 
     try:
+        try:
+            conn.disable_device()
+        except Exception as disable_exc:
+            logger.warning("[CLOCK_USERS_PUSH] No se pudo deshabilitar el dispositivo antes del push: %s", disable_exc)
         for user in users:
             try:
                 privilege = 14 if user.get("privilege") == "admin" else 0
@@ -1411,13 +1456,15 @@ async def push_users_to_clock(request: Request):
                         f"El usuario {user.get('user_id', '(sin ID)')} no tiene UID numérico válido. "
                         "Edita el ID de empleado para que sea numérico o vuelve a importarlo desde el reloj."
                     )
-                conn.set_user(
+                card_value = _safe_parse_int(user.get("card_number", 0), 0)
+                await run_in_threadpool(
+                    conn.set_user,
                     uid=uid,
                     name=user.get("name", ""),
                     privilege=privilege,
                     password=user.get("password", ""),
                     user_id=str(user["user_id"]),
-                    card=user.get("card_number", "")
+                    card=card_value
                 )
                 await db.clock_users.update_one(
                     {"_id": user["_id"]},
@@ -1425,6 +1472,14 @@ async def push_users_to_clock(request: Request):
                 )
                 pushed += 1
             except Exception as exc:
+                logger.exception(
+                    "[CLOCK_USERS_PUSH] Error al subir usuario al reloj | user_id=%s | uid=%s | nombre=%s | privilegio=%s | error=%s",
+                    user.get("user_id"),
+                    user.get("uid", user.get("user_id")),
+                    user.get("name", ""),
+                    user.get("privilege", "empleado"),
+                    exc,
+                )
                 errors.append({"user_id": user.get("user_id"), "error": str(exc)})
                 await db.clock_users.update_one(
                     {"_id": user["_id"]},
@@ -1432,15 +1487,133 @@ async def push_users_to_clock(request: Request):
                 )
     finally:
         try:
-            conn.enable_device()
+            await run_in_threadpool(conn.enable_device)
         except Exception:
             pass
         try:
-            conn.disconnect()
+            await run_in_threadpool(conn.disconnect)
         except Exception:
             pass
 
     return {"pushed": pushed, "errors": errors}
+
+
+async def sync_clock_data(config: Dict[str, Any]):
+    conn = None
+    attendance = []
+    detected_records = 0
+    skipped_duplicates = 0
+    inserted_records = 0
+
+    rules = config.get("rules", []) or []
+    default_rule = next((r for r in rules if str(r.get("name", "")).strip().lower() == "turno general"), None)
+    if not default_rule and rules:
+        default_rule = rules[0]
+    if not default_rule:
+        default_rule = {"name": "Turno General", "expected_entry_time": "09:00", "tolerance_minutes": 30}
+
+    rule_by_name = {str(r.get("name", "")).strip(): r for r in rules if str(r.get("name", "")).strip()}
+    clock_users = await db.clock_users.find({}, {"user_id": 1, "work_schedule": 1}).to_list(5000)
+    schedule_by_clock_user = {
+        str(u.get("user_id", "")).strip(): str(u.get("work_schedule", "Turno General") or "Turno General").strip()
+        for u in clock_users
+        if str(u.get("user_id", "")).strip()
+    }
+
+    try:
+        print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
+        conn = await get_clock_connection(config)
+        print("Conexión exitosa")
+        await run_in_threadpool(conn.disable_device)
+        attendance = await run_in_threadpool(conn.get_attendance)
+        detected_records = len(attendance or [])
+        print(f"Registros encontrados: {detected_records}")
+        print(f"[CLOCK_SYNC] Registros detectados por zk.get_attendance(): {detected_records}")
+        logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
+    except HTTPException:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al sincronizar asistencias: {exc}")
+    except Exception as exc:
+        if exc.__class__.__name__ == "ZKNetworkError":
+            raise HTTPException(status_code=503, detail=f"Error de red con el reloj: {exc}")
+        raise HTTPException(status_code=503, detail=f"No se pudo sincronizar con el reloj: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.enable_device)
+            except Exception:
+                pass
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
+
+    for item in attendance or []:
+        timestamp = getattr(item, "timestamp", None)
+        clock_user_id = str(getattr(item, "user_id", "") or "").strip()
+        source_device_id = str(getattr(item, "device_id", "") or "").strip()
+        if not clock_user_id or not isinstance(timestamp, datetime):
+            continue
+
+        normalized_ts = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
+        id_candidates: List[Any] = [clock_user_id]
+        if clock_user_id.isdigit():
+            id_candidates.append(int(clock_user_id))
+        employee_doc = await db.employees.find_one(
+            {"employee_id": {"$in": id_candidates}},
+            {"employee_id": 1, "name": 1}
+        )
+        if not employee_doc:
+            employee_id = "ID Desconocido"
+            employee_name = f"ID Reloj: {clock_user_id}"
+        else:
+            employee_id = str(employee_doc.get("employee_id", "") or "").strip() or "ID Desconocido"
+            employee_name = str(employee_doc.get("name", "") or "").strip() or f"ID Reloj: {clock_user_id}"
+
+        schedule_name = schedule_by_clock_user.get(clock_user_id, "Turno General")
+        rule = rule_by_name.get(schedule_name) or default_rule
+        expected_entry_time = str(rule.get("expected_entry_time", "09:00") or "09:00")
+        tolerance_minutes = _safe_parse_int(rule.get("tolerance_minutes", 30), 30)
+        try:
+            expected_hour, expected_minute = [int(part) for part in expected_entry_time.split(":", 1)]
+        except Exception:
+            expected_hour, expected_minute = 9, 0
+
+        scheduled_dt = normalized_ts.replace(hour=expected_hour, minute=expected_minute, second=0, microsecond=0)
+        delay_minutes = max((normalized_ts - scheduled_dt).total_seconds() / 60.0, 0.0)
+        status = "RETARDO" if delay_minutes > tolerance_minutes else "PRESENTE"
+
+        record = {
+            "employee_id": employee_id,
+            "employee_name": employee_name,
+            "timestamp": normalized_ts,
+            "type": str(getattr(item, "status", getattr(item, "punch", 0))),
+            "clock_user_id": clock_user_id,
+            "source_device_id": source_device_id,
+            "work_schedule": schedule_name,
+            "expected_entry_time": expected_entry_time,
+            "tolerance_minutes": tolerance_minutes,
+            "delay_minutes": round(delay_minutes, 2),
+            "status": status,
+        }
+
+        exists = await db.attendance_records.find_one(
+            {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
+            {"_id": 1}
+        )
+        if exists:
+            skipped_duplicates += 1
+            continue
+        await db.attendance_records.insert_one(record)
+        inserted_records += 1
+
+    await db.clock_config.update_one(
+        {},
+        {"$set": {"connected": True, "last_sync": datetime.now()}},
+        upsert=True
+    )
+    return detected_records, skipped_duplicates, inserted_records
 
 
 @api_router.get("/clock/attendance/live")
@@ -1474,86 +1647,7 @@ async def sync_clock_attendance(request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    conn = None
-    detected_records = 0
-    skipped_duplicates = 0
-    inserted_records = 0
-    try:
-        print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
-        conn = await get_clock_connection(config)
-        print("Conexión exitosa")
-        await run_in_threadpool(conn.disable_device)
-        await run_in_threadpool(conn.set_time, datetime.now())
-        attendance = await run_in_threadpool(conn.get_attendance)
-        detected_records = len(attendance or [])
-        print(f"Registros encontrados: {detected_records}")
-        print(f"[CLOCK_SYNC] Registros detectados por zk.get_attendance(): {detected_records}")
-        logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
-    except HTTPException:
-        raise
-    except TimeoutError as exc:
-        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al sincronizar asistencias: {exc}")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"No se pudo sincronizar con el reloj: {exc}")
-    finally:
-        if conn:
-            try:
-                await run_in_threadpool(conn.enable_device)
-            except Exception:
-                pass
-            try:
-                await run_in_threadpool(conn.disconnect)
-            except Exception:
-                pass
-
-    for item in attendance or []:
-        timestamp = getattr(item, "timestamp", None)
-        clock_user_id = str(getattr(item, "user_id", "") or "").strip()
-        # No filtramos por ID de dispositivo para aceptar eventos del equipo Steren (ID 1 u otros reportados por pyzk).
-        source_device_id = str(getattr(item, "device_id", "") or "").strip()
-        if not clock_user_id or not isinstance(timestamp, datetime):
-            continue
-        print(f"Procesando registro de Usuario ID: {clock_user_id} en fecha {timestamp}")
-
-        id_candidates: List[Any] = [clock_user_id]
-        if clock_user_id.isdigit():
-            id_candidates.append(int(clock_user_id))
-        employee_doc = await db.employees.find_one(
-            {"employee_id": {"$in": id_candidates}},
-            {"employee_id": 1, "name": 1}
-        )
-        if not employee_doc:
-            print(f"ID del reloj {clock_user_id} no encontrado en la base de datos")
-            logger.info("ID del reloj %s no encontrado en la base de datos", clock_user_id)
-            employee_id = "ID Desconocido"
-            employee_name = f"ID Reloj: {clock_user_id}"
-        else:
-            employee_id = str(employee_doc.get("employee_id", "") or "").strip() or "ID Desconocido"
-            employee_name = str(employee_doc.get("name", "") or "").strip() or f"ID Reloj: {clock_user_id}"
-
-        record = {
-            "employee_id": employee_id,
-            "employee_name": employee_name,
-            "timestamp": timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp,
-            "type": str(getattr(item, "status", getattr(item, "punch", 0))),
-            "clock_user_id": clock_user_id,
-            "source_device_id": source_device_id,
-        }
-        exists = await db.attendance_records.find_one(
-            {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
-            {"_id": 1}
-        )
-        if exists:
-            skipped_duplicates += 1
-            continue
-        await db.attendance_records.insert_one(record)
-        inserted_records += 1
-
-    await db.clock_config.update_one(
-        {},
-        {"$set": {"connected": True, "last_sync": datetime.now()}},
-        upsert=True
-    )
+    detected_records, skipped_duplicates, inserted_records = await sync_clock_data(config)
 
     return ClockSyncResponse(
         synced_records=inserted_records,

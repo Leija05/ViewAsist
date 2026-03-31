@@ -1117,6 +1117,7 @@ const DashboardPage = () => {
                             <th className="text-left p-2">Nombre</th>
                             <th className="text-left p-2">Huella</th>
                             <th className="text-left p-2">Horario</th>
+                            <th className="text-left p-2">Sync</th>
                             <th className="text-left p-2">Acciones</th>
                           </tr>
                         </thead>
@@ -1127,6 +1128,15 @@ const DashboardPage = () => {
                               <td className="p-2">{u.name}</td>
                               <td className="p-2">{u.fingerprint_registered ? 'Sí' : 'No'}</td>
                               <td className="p-2">{u.work_schedule || 'Turno General'}</td>
+                              <td className="p-2">
+                                {u.sync_status === 'synced' ? (
+                                  <Badge className="bg-green-100 text-green-700 border border-green-200">Sincronizado</Badge>
+                                ) : u.sync_status === 'error' ? (
+                                  <Badge className="bg-red-100 text-red-700 border border-red-200">Error</Badge>
+                                ) : (
+                                  <Badge className="bg-amber-100 text-amber-700 border border-amber-200">Pendiente</Badge>
+                                )}
+                              </td>
                               <td className="p-2 flex gap-1">
                                 <Button size="sm" variant="ghost" onClick={() => openEditClockUserDialog(u)}>Editar</Button>
                                 <Button size="sm" variant="ghost" className="text-red-600" onClick={() => handleDeleteClockUser(u)}>Borrar</Button>
@@ -1135,7 +1145,7 @@ const DashboardPage = () => {
                           ))}
                           {clockUsers.length === 0 && (
                             <tr>
-                              <td className="p-3 text-zinc-500" colSpan={5}>No hay usuarios cargados.</td>
+                              <td className="p-3 text-zinc-500" colSpan={6}>No hay usuarios cargados.</td>
                             </tr>
                           )}
                         </tbody>
