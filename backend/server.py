@@ -29,7 +29,7 @@ try:
 except Exception:
     ZK = None
 
-socket.setdefaulttimeout(20)
+socket.setdefaulttimeout(10)
 
 
 ROOT_DIR = Path(__file__).parent
@@ -957,6 +957,7 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
 def _fetch_clock_attendance(config: Dict[str, Any]) -> Dict[str, Any]:
     conn = _connect_to_clock(config)
     try:
+        conn.disable_device()
         users = conn.get_users() or []
         user_lookup = {str(u.user_id): (u.name or f"Empleado {u.user_id}") for u in users}
         attendance = conn.get_attendance() or []
@@ -970,9 +971,15 @@ def _fetch_clock_attendance(config: Dict[str, Any]) -> Dict[str, Any]:
             normalized.append({"employee_id": user_id, "timestamp": timestamp})
 
         return {"records": normalized, "users": user_lookup}
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al leer asistencias del reloj: {exc}")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error al leer asistencias del reloj: {exc}")
+        raise HTTPException(status_code=503, detail=f"Error al leer asistencias del reloj: {exc}")
     finally:
+        try:
+            conn.enable_device()
+        except Exception:
+            pass
         try:
             conn.disconnect()
         except Exception:
@@ -1009,7 +1016,7 @@ def _connect_to_clock(config: Dict[str, Any]):
     except Exception:
         raise HTTPException(status_code=400, detail="La Contraseña/Comm Key debe ser numérica.")
 
-    zk_client = ZK(device_ip, port=device_port, timeout=10, password=device_password, force_udp=False, ommit_ping=False)
+    zk_client = ZK(device_ip, port=device_port, timeout=8, password=device_password, force_udp=False, ommit_ping=False)
     try:
         return zk_client.connect()
     except Exception as exc:
@@ -1019,7 +1026,9 @@ def _connect_to_clock(config: Dict[str, Any]):
                 status_code=400,
                 detail="No se pudo autenticar con el reloj. Verifica la Contraseña/Comm Key en Configuración."
             )
-        raise HTTPException(status_code=500, detail=f"No se pudo conectar al reloj: {message}")
+        if "timed out" in message.lower() or "timeout" in message.lower():
+            raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al conectar con el reloj: {message}")
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar al reloj: {message}")
 
 
 async def get_clock_connection(config: dict):
@@ -1032,17 +1041,17 @@ async def get_clock_connection(config: dict):
 
     device_port = _safe_parse_int(config.get("port", 4370), 4370)
     device_password = _safe_parse_int(config.get("password", 0), 0)
-    force_udp = True
+    force_udp = False
 
     last_error = None
     for attempt in range(1, 4):
         try:
-            socket.setdefaulttimeout(30)
-            print(f"Intentando apertura de puerto 4370 UDP hacia {device_ip}....")
+            socket.setdefaulttimeout(10)
+            print(f"Intentando conexión TCP al reloj {device_ip}:{device_port}....")
             zk_client = ZK(
                 device_ip,
-                port=4370,
-                timeout=30,
+                port=device_port,
+                timeout=8,
                 password=device_password,
                 force_udp=force_udp,
                 ommit_ping=True
@@ -1078,8 +1087,10 @@ async def get_clock_connection(config: dict):
             if attempt < 3:
                 await asyncio.sleep(2)
 
+    error_text = str(last_error or "").lower()
+    status_code = 408 if "timed out" in error_text or "timeout" in error_text else 503
     raise HTTPException(
-        status_code=502,
+        status_code=status_code,
         detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}) tras 3 intentos. "
                f"Verifica red/puerto/comm key. Último error: {last_error}"
     )
@@ -1335,6 +1346,7 @@ async def pull_users_from_clock(request: Request):
     conn = _connect_to_clock(config)
     imported = 0
     try:
+        conn.disable_device()
         users = conn.get_users() or []
         for user in users:
             user_id = _resolve_clock_user_id(user)
@@ -1364,6 +1376,10 @@ async def pull_users_from_clock(request: Request):
             )
             imported += 1
     finally:
+        try:
+            conn.enable_device()
+        except Exception:
+            pass
         try:
             conn.disconnect()
         except Exception:
@@ -1416,6 +1432,10 @@ async def push_users_to_clock(request: Request):
                 )
     finally:
         try:
+            conn.enable_device()
+        except Exception:
+            pass
+        try:
             conn.disconnect()
         except Exception:
             pass
@@ -1462,6 +1482,7 @@ async def sync_clock_attendance(request: Request):
         print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
         print("Conexión exitosa")
+        await run_in_threadpool(conn.disable_device)
         await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
@@ -1470,10 +1491,16 @@ async def sync_clock_attendance(request: Request):
         logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
     except HTTPException:
         raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al sincronizar asistencias: {exc}")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se pudo sincronizar con el reloj: {exc}")
+        raise HTTPException(status_code=503, detail=f"No se pudo sincronizar con el reloj: {exc}")
     finally:
         if conn:
+            try:
+                await run_in_threadpool(conn.enable_device)
+            except Exception:
+                pass
             try:
                 await run_in_threadpool(conn.disconnect)
             except Exception:
@@ -1482,6 +1509,8 @@ async def sync_clock_attendance(request: Request):
     for item in attendance or []:
         timestamp = getattr(item, "timestamp", None)
         clock_user_id = str(getattr(item, "user_id", "") or "").strip()
+        # No filtramos por ID de dispositivo para aceptar eventos del equipo Steren (ID 1 u otros reportados por pyzk).
+        source_device_id = str(getattr(item, "device_id", "") or "").strip()
         if not clock_user_id or not isinstance(timestamp, datetime):
             continue
         print(f"Procesando registro de Usuario ID: {clock_user_id} en fecha {timestamp}")
@@ -1508,6 +1537,7 @@ async def sync_clock_attendance(request: Request):
             "timestamp": timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp,
             "type": str(getattr(item, "status", getattr(item, "punch", 0))),
             "clock_user_id": clock_user_id,
+            "source_device_id": source_device_id,
         }
         exists = await db.attendance_records.find_one(
             {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
@@ -1552,6 +1582,7 @@ async def import_clock_users(request: Request):
         print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
         print("Conexión exitosa")
+        await run_in_threadpool(conn.disable_device)
         clock_users = await run_in_threadpool(conn.get_users)
 
         for user in clock_users or []:
@@ -1580,10 +1611,16 @@ async def import_clock_users(request: Request):
             imported += 1
     except HTTPException:
         raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al importar usuarios del reloj: {exc}")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"No se pudieron importar usuarios del reloj: {exc}")
+        raise HTTPException(status_code=503, detail=f"No se pudieron importar usuarios del reloj: {exc}")
     finally:
         if conn:
+            try:
+                await run_in_threadpool(conn.enable_device)
+            except Exception:
+                pass
             try:
                 await run_in_threadpool(conn.disconnect)
             except Exception:
@@ -1742,22 +1779,6 @@ async def startup_event():
             "last_sync": None,
             "created_at": datetime.now(timezone.utc)
         })
-    else:
-        legacy_ip = str(clock_config.get("ip", "") or "").strip()
-        legacy_password = str(clock_config.get("password", "") or "").strip()
-        legacy_name = str(clock_config.get("device_name", "") or "").strip()
-        if (
-            not clock_config.get("connected", False)
-            and legacy_ip == "192.168.1.104"
-            and legacy_password in {"123", "1234"}
-            and legacy_name == "Reloj Principal"
-        ):
-            await db.clock_config.update_one(
-                {"_id": clock_config["_id"]},
-                {"$set": {"device_name": "", "ip": "", "password": ""}}
-            )
-            logger.info("Clock config reset from legacy defaults to empty values")
-
     await db.clock_events.create_index("created_at")
     
     # Write test credentials
