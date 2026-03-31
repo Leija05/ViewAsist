@@ -13,6 +13,7 @@ import asyncio
 import bcrypt
 import jwt
 import io
+import csv
 import secrets
 import socket
 import ipaddress
@@ -785,6 +786,65 @@ async def export_pdf(report_id: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generando PDF: {str(e)}")
 
+
+@api_router.get("/reports/export")
+async def export_clock_events_csv(request: Request):
+    await get_current_user(request)
+
+    users = await db.clock_users.find({}, {"user_id": 1, "name": 1}).to_list(5000)
+    user_name_by_id = {
+        str(u.get("user_id", "")).strip(): str(u.get("name", "")).strip() or f"ID {u.get('user_id', '')}"
+        for u in users
+        if str(u.get("user_id", "")).strip()
+    }
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Nombre del empleado", "Fecha", "Hora de entrada", "Estatus"])
+
+    docs = await db.clock_events.find({}, {"events": 1}).sort("created_at", -1).to_list(2000)
+    for doc in docs:
+        for event in doc.get("events", []):
+            raw_user_id = str(
+                event.get("clock_user_id")
+                or event.get("employee_id")
+                or event.get("user_id")
+                or ""
+            ).strip()
+            employee_name = (
+                event.get("employee_name")
+                or user_name_by_id.get(raw_user_id)
+                or f"ID Reloj: {raw_user_id or 'Desconocido'}"
+            )
+            raw_timestamp = event.get("timestamp")
+            if isinstance(raw_timestamp, datetime):
+                event_dt = raw_timestamp
+            else:
+                try:
+                    event_dt = datetime.fromisoformat(str(raw_timestamp))
+                except Exception:
+                    event_dt = None
+
+            if event_dt:
+                event_date = event_dt.strftime("%Y-%m-%d")
+                event_time = event_dt.strftime("%H:%M:%S")
+            else:
+                event_date = ""
+                event_time = str(raw_timestamp or "")
+
+            raw_status = str(event.get("status", "") or "").strip().upper()
+            status = "Retardo" if raw_status == "RETARDO" else "Asistencia"
+            writer.writerow([employee_name, event_date, event_time, status])
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    output.close()
+
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=reporte_asistencia.csv"},
+    )
+
 # Dashboard Stats
 @api_router.get("/dashboard/stats")
 async def get_dashboard_stats(request: Request):
@@ -1382,6 +1442,10 @@ async def push_users_to_clock(request: Request):
     errors = []
 
     try:
+        try:
+            conn.disable_device()
+        except Exception as disable_exc:
+            logger.warning("[CLOCK_USERS_PUSH] No se pudo deshabilitar el dispositivo antes del push: %s", disable_exc)
         for user in users:
             try:
                 privilege = 14 if user.get("privilege") == "admin" else 0
@@ -1460,6 +1524,7 @@ async def sync_clock_data(config: Dict[str, Any]):
         print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
         print("Conexión exitosa")
+        await run_in_threadpool(conn.disable_device)
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
         print(f"Registros encontrados: {detected_records}")
