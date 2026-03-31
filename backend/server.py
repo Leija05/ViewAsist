@@ -1016,7 +1016,7 @@ def _connect_to_clock(config: Dict[str, Any]):
     except Exception:
         raise HTTPException(status_code=400, detail="La Contraseña/Comm Key debe ser numérica.")
 
-    zk_client = ZK(device_ip, port=device_port, timeout=8, password=device_password, force_udp=False, ommit_ping=False)
+    zk_client = ZK(device_ip, port=device_port, timeout=8, password=1234, force_udp=False, ommit_ping=False)
     try:
         return zk_client.connect()
     except Exception as exc:
