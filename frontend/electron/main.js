@@ -8,6 +8,7 @@ const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8000);
 const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const projectRoot = path.resolve(__dirname, '..', '..');
 
+const isPackaged = app.isPackaged;
 let backendProcess = null;
 let backendExitInfo = null;
 const backendStderrBuffer = [];
@@ -158,8 +159,6 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 1100,
-    minHeight: 700,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -167,8 +166,12 @@ function createWindow() {
     },
   });
 
-  const startUrl = process.env.ELECTRON_START_URL || `file://${path.join(__dirname, '../build/index.html')}`;
-  win.loadURL(startUrl);
+  if (isPackaged) {
+  
+    win.loadFile(path.join(__dirname, '../build/index.html'));
+  } else {
+    win.loadURL(process.env.ELECTRON_START_URL || 'http://localhost:3000');
+  }
 }
 
 app.whenReady().then(() => {

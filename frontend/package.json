@@ -1,6 +1,13 @@
 {
   "name": "frontend",
   "version": "0.1.0",
+  "homepage": "./",
+  "description": "ViewAsist desktop attendance management app",
+  "author": "ViewAsist Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Leija05/ViewAsist.git"
+  },
   "private": true,
   "dependencies": {
     "@hookform/resolvers": "^5.0.1",
@@ -60,7 +67,9 @@
     "build": "craco build",
     "test": "craco test",
     "electron": "electron ./electron/main.js",
-    "dev:electron": "concurrently -k \"cross-env BROWSER=none REACT_APP_BACKEND_URL=http://localhost:8000 craco start\" \"wait-on http://localhost:3000 && cross-env ELECTRON_START_URL=http://localhost:3000 BACKEND_HOST=localhost electron ./electron/main.js\""
+    "dev:electron": "concurrently -k \"cross-env BROWSER=none REACT_APP_BACKEND_URL=http://localhost:8000 craco start\" \"wait-on http://localhost:3000 && cross-env ELECTRON_START_URL=http://localhost:3000 BACKEND_HOST=localhost electron ./electron/main.js\"",
+    "dist": "yarn build && electron-builder",
+    "dist:win": "yarn build && electron-builder --win nsis"
   },
   "browserslist": {
     "production": [
@@ -89,10 +98,56 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "electron": "^35.2.1",
+    "electron-builder": "^24.13.3",
     "concurrently": "^9.2.0",
     "wait-on": "^8.0.3",
     "cross-env": "^7.0.3"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
-  "main": "electron/main.js"
+  "main": "electron/main.js",
+  "build": {
+    "extends": null,
+    "appId": "com.viewasist.desktop",
+    "productName": "ViewAsist",
+    "directories": {
+      "output": "dist"
+    },
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "files": [
+      "build/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Leija05",
+        "repo": "AiewAsist"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
 }
