@@ -105,6 +105,7 @@ const DashboardPage = () => {
     start_date: '',
     end_date: ''
   });
+  const [attSettings, setAttSettings] = useState([{ numero: 1, entrada: '09:00', salida: '18:00', tiempo_extra: 0 }]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -198,6 +199,16 @@ const DashboardPage = () => {
     }
   }, []);
 
+  const fetchClockSettings = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/clock/settings`, { withCredentials: true });
+      const rows = response.data?.settings || [];
+      setAttSettings(rows.length ? rows : [{ numero: 1, entrada: '09:00', salida: '18:00', tiempo_extra: 0 }]);
+    } catch (error) {
+      console.error('Error fetching clock settings:', error);
+    }
+  }, []);
+
   const fetchRecentEvents = useCallback(async () => {
     try {
       const response = await axios.get(`${API_URL}/api/clock/events?limit=10`, { withCredentials: true });
@@ -217,6 +228,7 @@ const DashboardPage = () => {
         fetchClockConfig(),
         fetchClockStatus(),
         fetchClockUsers(),
+        fetchClockSettings(),
         fetchRecentEvents(),
         fetchVersion(),
         fetchClockNetworkStatus()
@@ -224,7 +236,7 @@ const DashboardPage = () => {
       setLoading(false);
     };
     loadData();
-  }, [fetchDashboardData, fetchReports, fetchSettings, fetchClockConfig, fetchClockStatus, fetchClockUsers, fetchRecentEvents, fetchVersion, fetchClockNetworkStatus]);
+  }, [fetchDashboardData, fetchReports, fetchSettings, fetchClockConfig, fetchClockStatus, fetchClockUsers, fetchClockSettings, fetchRecentEvents, fetchVersion, fetchClockNetworkStatus]);
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -553,6 +565,28 @@ const DashboardPage = () => {
     }
   };
 
+  const handleSyncAndDownloadHistoricalReport = async () => {
+    try {
+      const response = await axios.post(`${API_URL}/api/reports/sync`, {}, {
+        withCredentials: true,
+        responseType: 'blob'
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Reporte_de_Asistencia.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Sincronización completada y reporte descargado');
+      await fetchClockUsers();
+      await fetchClockStatus();
+      await fetchRecentEvents();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'No se pudo sincronizar y descargar el reporte');
+    }
+  };
+
   const handleExportClockConfig = async () => {
     try {
       const response = await axios.get(`${API_URL}/api/clock/config/export`, {
@@ -586,6 +620,22 @@ const DashboardPage = () => {
       toast.error(error.response?.data?.detail || 'No se pudo importar la configuración');
     } finally {
       event.target.value = '';
+    }
+  };
+
+  const handleAttSettingChange = (index, field, value) => {
+    const cloned = [...attSettings];
+    cloned[index] = { ...cloned[index], [field]: field === 'tiempo_extra' || field === 'numero' ? Number(value) : value };
+    setAttSettings(cloned);
+  };
+
+  const handleSaveAttSettings = async () => {
+    try {
+      await axios.post(`${API_URL}/api/clock/settings`, { settings: attSettings }, { withCredentials: true });
+      toast.success('Horarios guardados en reloj');
+      await fetchClockSettings();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'No se pudieron guardar horarios');
     }
   };
 
@@ -1160,7 +1210,6 @@ const DashboardPage = () => {
                 )}
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" className="border-2" onClick={openCreateClockUserDialog}>+ Agregar usuario</Button>
-                  <Button variant="outline" className="border-2" onClick={handlePullUsers} disabled={clockReadOnly}>Importar usuarios del reloj</Button>
                   <Button variant="outline" className="border-2" onClick={handlePushUsers} disabled={clockReadOnly}>Subir pendientes al reloj</Button>
                   <Button variant="outline" className="border-2" onClick={handleSyncFromClock} disabled={clockReadOnly}>Descargar asistencias</Button>
                   <Button variant="outline" className="border-2" onClick={fetchRecentEvents}>Actualizar eventos</Button>
@@ -1187,6 +1236,9 @@ const DashboardPage = () => {
                     </Button>
                   </div>
                 </div>
+                <Button className="w-full bg-black text-white hover:bg-zinc-800" onClick={handleSyncAndDownloadHistoricalReport}>
+                  Sincronizar y Descargar Reporte
+                </Button>
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                   <div className="border border-zinc-200 dark:border-zinc-800">
                     <div className="p-2 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 text-xs font-semibold uppercase tracking-widest">Usuarios del reloj</div>
@@ -1246,6 +1298,39 @@ const DashboardPage = () => {
                         <div className="p-3 text-zinc-500 text-sm">No hay eventos recientes.</div>
                       )}
                     </div>
+                  </div>
+                </div>
+                <div className="border border-zinc-200 dark:border-zinc-800">
+                  <div className="p-3 border-b border-zinc-200 dark:border-zinc-800 text-sm font-semibold">Ajuste de Horarios (AttSetting)</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-zinc-50 dark:bg-zinc-900">
+                        <tr>
+                          <th className="p-2 text-left">Número</th>
+                          <th className="p-2 text-left">Entrada</th>
+                          <th className="p-2 text-left">Salida</th>
+                          <th className="p-2 text-left">Tiempo Extra</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {attSettings.map((row, index) => (
+                          <tr key={`${row.numero}-${index}`} className="border-t border-zinc-100 dark:border-zinc-900">
+                            <td className="p-2"><Input type="number" value={row.numero} onChange={(e) => handleAttSettingChange(index, 'numero', e.target.value)} /></td>
+                            <td className="p-2"><Input value={row.entrada} onChange={(e) => handleAttSettingChange(index, 'entrada', e.target.value)} /></td>
+                            <td className="p-2"><Input value={row.salida} onChange={(e) => handleAttSettingChange(index, 'salida', e.target.value)} /></td>
+                            <td className="p-2"><Input type="number" value={row.tiempo_extra} onChange={(e) => handleAttSettingChange(index, 'tiempo_extra', e.target.value)} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="p-3 flex gap-2">
+                    <Button variant="outline" onClick={() => setAttSettings([...attSettings, { numero: attSettings.length + 1, entrada: '09:00', salida: '18:00', tiempo_extra: 0 }])}>
+                      Agregar fila
+                    </Button>
+                    <Button className="bg-black text-white hover:bg-zinc-800" onClick={handleSaveAttSettings}>
+                      Guardar en Reloj
+                    </Button>
                   </div>
                 </div>
               </div>

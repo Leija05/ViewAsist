@@ -260,6 +260,17 @@ class ClockConfigImportPayload(BaseModel):
     password: str = ""
     rules: List[AttendanceRule] = Field(default_factory=list)
 
+
+class AttSettingRow(BaseModel):
+    numero: int
+    entrada: str
+    salida: str
+    tiempo_extra: int = 0
+
+
+class AttSettingsPayload(BaseModel):
+    settings: List[AttSettingRow] = Field(default_factory=list)
+
 class ClockUserBase(BaseModel):
     user_id: str
     name: str
@@ -1518,7 +1529,7 @@ async def push_users_to_clock(request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    users = await db.clock_users.find({"sync_status": {"$ne": "sincronizado"}}).to_list(2000)
+    users = await db.clock_users.find({"sync_status": "pendiente"}).to_list(2000)
     conn = _connect_to_clock(config)
     pushed = 0
     errors = []
@@ -1578,6 +1589,240 @@ async def push_users_to_clock(request: Request):
             pass
 
     return {"pushed": pushed, "errors": errors}
+
+
+def _normalize_timestamp(raw_timestamp: Any) -> Optional[datetime]:
+    if isinstance(raw_timestamp, datetime):
+        return raw_timestamp
+    if raw_timestamp is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw_timestamp))
+    except Exception:
+        return None
+
+
+@api_router.post("/reports/sync")
+async def sync_and_export_historical_report(request: Request):
+    await get_current_user(request)
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = None
+    attendance = []
+    clock_users = []
+    try:
+        conn = _connect_to_clock(config)
+        conn.disable_device()
+        attendance = await run_in_threadpool(conn.get_attendance)
+        clock_users = await run_in_threadpool(conn.get_users)
+    except HTTPException:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al sincronizar: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Error de hardware al sincronizar: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.enable_device)
+            except Exception:
+                pass
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
+
+    user_name_map = {
+        _resolve_clock_user_id(user): str(getattr(user, "name", "") or "").strip()
+        for user in (clock_users or [])
+        if _resolve_clock_user_id(user)
+    }
+
+    grouped_records: Dict[tuple, Dict[str, Any]] = {}
+    synced_events: List[Dict[str, Any]] = []
+    for item in attendance or []:
+        user_id = str(getattr(item, "user_id", "") or "").strip()
+        timestamp = getattr(item, "timestamp", None)
+        ts = _normalize_timestamp(timestamp)
+        if not user_id or not ts:
+            continue
+
+        user_name = user_name_map.get(user_id) or f"Empleado {user_id}"
+        key = (user_id, ts.date().isoformat())
+        current = grouped_records.get(key)
+        if not current:
+            current = {
+                "id": user_id,
+                "nombre": user_name,
+                "depto": "General",
+                "fecha": ts.date().isoformat(),
+                "entrada": ts,
+                "salida": ts,
+            }
+            grouped_records[key] = current
+        else:
+            if ts < current["entrada"]:
+                current["entrada"] = ts
+            if ts > current["salida"]:
+                current["salida"] = ts
+
+        synced_events.append({
+            "clock_user_id": user_id,
+            "employee_name": user_name,
+            "timestamp": ts,
+        })
+
+    # Sync identidad de usuarios en MongoDB
+    for row in grouped_records.values():
+        await db.clock_users.update_one(
+            {"user_id": row["id"]},
+            {
+                "$set": {
+                    "name": row["nombre"],
+                    "department": row["depto"],
+                    "sync_status": "sincronizado",
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$setOnInsert": {
+                    "created_at": datetime.now(timezone.utc),
+                    "uid": _safe_parse_int(row["id"], 0),
+                    "privilege": "empleado",
+                    "password": "",
+                    "card_number": "",
+                    "fingerprint_registered": True,
+                    "face_registered": False,
+                    "vein_registered": False,
+                    "work_schedule": "Turno General",
+                    "enabled": True,
+                },
+            },
+            upsert=True,
+        )
+
+    if synced_events:
+        await db.clock_events.insert_one({
+            "events": synced_events,
+            "total_events": len(synced_events),
+            "created_at": datetime.now(timezone.utc),
+        })
+
+    await db.clock_config.update_one(
+        {},
+        {"$set": {"last_sync": datetime.now(timezone.utc), "connected": True}},
+        upsert=True,
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Nombre", "Depto", "Fecha", "Entrada", "Salida"])
+    for row in sorted(grouped_records.values(), key=lambda r: (r["fecha"], r["id"])):
+        writer.writerow([
+            row["id"],
+            row["nombre"],
+            row["depto"],
+            row["fecha"],
+            row["entrada"].strftime("%H:%M:%S"),
+            row["salida"].strftime("%H:%M:%S"),
+        ])
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    output.close()
+    filename = f"Reporte_de_Asistencia_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@api_router.get("/clock/settings")
+async def get_clock_att_settings(request: Request):
+    await get_current_user(request)
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = None
+    try:
+        conn = _connect_to_clock(config)
+        conn.disable_device()
+        workcodes = []
+        if hasattr(conn, "get_workcode"):
+            workcodes = await run_in_threadpool(conn.get_workcode)
+    except HTTPException:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al leer horarios: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Error de hardware al leer horarios: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.enable_device)
+            except Exception:
+                pass
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
+
+    rows = []
+    for idx, code in enumerate(workcodes or [], start=1):
+        rows.append({
+            "numero": idx,
+            "entrada": str(getattr(code, "start", "09:00") or "09:00"),
+            "salida": str(getattr(code, "end", "18:00") or "18:00"),
+            "tiempo_extra": _safe_parse_int(getattr(code, "ot", 0), 0),
+        })
+
+    if not rows:
+        stored = await db.clock_settings.find_one({}, {"_id": 0})
+        rows = (stored or {}).get("settings", [])
+    return {"settings": rows}
+
+
+@api_router.post("/clock/settings")
+async def save_clock_att_settings(payload: AttSettingsPayload, request: Request):
+    await get_current_user(request)
+    config = await db.clock_config.find_one({}, {"_id": 0})
+    if not config:
+        raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
+
+    conn = None
+    try:
+        conn = _connect_to_clock(config)
+        conn.disable_device()
+        for row in payload.settings:
+            if hasattr(conn, "set_workcode"):
+                try:
+                    await run_in_threadpool(conn.set_workcode, int(row.numero), row.entrada)
+                except TypeError:
+                    await run_in_threadpool(conn.set_workcode, int(row.numero))
+    except HTTPException:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=f"Tiempo de espera agotado al guardar horarios: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Error de hardware al guardar horarios: {exc}")
+    finally:
+        if conn:
+            try:
+                await run_in_threadpool(conn.enable_device)
+            except Exception:
+                pass
+            try:
+                await run_in_threadpool(conn.disconnect)
+            except Exception:
+                pass
+
+    await db.clock_settings.update_one(
+        {},
+        {"$set": {"settings": [row.model_dump() for row in payload.settings], "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    return {"message": "Horarios guardados en reloj", "settings": payload.settings}
 
 
 async def sync_clock_data(config: Dict[str, Any]):
