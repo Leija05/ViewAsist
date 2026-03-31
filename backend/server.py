@@ -17,6 +17,7 @@ import secrets
 import socket
 import ipaddress
 import traceback
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
@@ -280,6 +281,16 @@ class VersionInfo(BaseModel):
     update_available: bool = False
     release_notes: Optional[str] = None
     download_url: Optional[str] = None
+
+
+BONO_ENTRY_START = "09:00"
+BONO_ENTRY_END = "09:30"
+ADMIN_SCHEDULES = {
+    "leonel puente": {"entry": "09:00", "exit": "18:00"},
+    "anahi espinoza": {"entry": "09:00", "exit": "17:00"},
+    "alejandro muñiz": {"entry": "11:00", "exit": "19:00"},
+    "alejandro muniz": {"entry": "11:00", "exit": "19:00"},
+}
 
 # Auth Routes
 @api_router.post("/auth/login")
@@ -846,6 +857,10 @@ async def get_employee_history(employee_id: str, request: Request):
     return history
 
 def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, Any], user_lookup: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def _normalize_name(value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(ch for ch in normalized if not unicodedata.combining(ch)).strip().lower()
+
     user_lookup = user_lookup or {}
     grouped: Dict[tuple, List[datetime]] = {}
 
@@ -860,6 +875,8 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
 
     entry_hour, entry_minute = map(int, settings.get("entry_time", "09:00").split(":"))
     tolerance_minutes = int(settings.get("tolerance_minutes", 30))
+    bono_start_h, bono_start_m = map(int, BONO_ENTRY_START.split(":"))
+    bono_end_h, bono_end_m = map(int, BONO_ENTRY_END.split(":"))
 
     attendance_records = []
     employee_summary: Dict[str, Dict[str, Any]] = {}
@@ -869,11 +886,21 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
         entry_time = punches[0]
         exit_time = punches[-1]
 
-        scheduled = datetime.fromisoformat(f"{date_str}T{entry_hour:02d}:{entry_minute:02d}:00").replace(tzinfo=timezone.utc)
+        employee_name = user_lookup.get(employee_id, f"Empleado {employee_id}")
+        employee_name_key = _normalize_name(employee_name)
+        custom_schedule = ADMIN_SCHEDULES.get(employee_name_key)
+        schedule_entry = custom_schedule["entry"] if custom_schedule else f"{entry_hour:02d}:{entry_minute:02d}"
+        schedule_entry_hour, schedule_entry_minute = map(int, schedule_entry.split(":"))
+
+        scheduled = datetime.fromisoformat(
+            f"{date_str}T{schedule_entry_hour:02d}:{schedule_entry_minute:02d}:00"
+        ).replace(tzinfo=timezone.utc)
         delay_minutes = max((entry_time - scheduled).total_seconds() / 60.0, 0)
         status = "retardo" if delay_minutes > tolerance_minutes else "presente"
+        bono_start_dt = datetime.fromisoformat(f"{date_str}T{bono_start_h:02d}:{bono_start_m:02d}:00").replace(tzinfo=timezone.utc)
+        bono_end_dt = datetime.fromisoformat(f"{date_str}T{bono_end_h:02d}:{bono_end_m:02d}:00").replace(tzinfo=timezone.utc)
+        bonus_aplica = bono_start_dt <= entry_time <= bono_end_dt
 
-        employee_name = user_lookup.get(employee_id, f"Empleado {employee_id}")
         attendance_records.append({
             "employee_id": employee_id,
             "name": employee_name,
@@ -885,6 +912,9 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
             "early_departure_minutes": 0,
             "absence_minutes": 0,
             "status": status,
+            "bonus_aplica": bonus_aplica,
+            "bonus_horario": f"{BONO_ENTRY_START} a {BONO_ENTRY_END}",
+            "admin_schedule": custom_schedule or None,
         })
 
         if employee_id not in employee_summary:
@@ -895,11 +925,17 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
                 "absence_days": 0,
                 "delay_count": 0,
                 "delay_minutes": 0,
+                "bonus_eligible_days": 0,
+                "bonus_lost_days": 0,
             }
 
         if status == "retardo":
             employee_summary[employee_id]["delay_count"] += 1
             employee_summary[employee_id]["delay_minutes"] += round(delay_minutes, 2)
+        if bonus_aplica:
+            employee_summary[employee_id]["bonus_eligible_days"] += 1
+        else:
+            employee_summary[employee_id]["bonus_lost_days"] += 1
 
     employees = list(employee_summary.values())
     statistics = {
@@ -907,6 +943,8 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
         "total_absences": 0,
         "total_delays": sum(e["delay_count"] for e in employees),
         "total_delay_minutes": round(sum(e["delay_minutes"] for e in employees), 2),
+        "bonus_window": f"{BONO_ENTRY_START} a {BONO_ENTRY_END}",
+        "bonus_policy_note": "Después de ese horario ya no cuenta para bono. Las faltas se mantienen para control de vacaciones.",
     }
 
     return {
