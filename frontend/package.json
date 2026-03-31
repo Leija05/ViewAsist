@@ -1,6 +1,7 @@
 {
   "name": "frontend",
   "version": "0.1.0",
+  "homepage": "./",
   "description": "ViewAsist desktop attendance management app",
   "author": "ViewAsist Team",
   "repository": {
