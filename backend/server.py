@@ -2,7 +2,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, UploadFile, File, Depends, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -17,6 +18,7 @@ import csv
 import json
 import secrets
 import socket
+import tempfile
 import ipaddress
 import traceback
 import unicodedata
@@ -808,6 +810,7 @@ async def export_pdf(report_id: str, request: Request):
 
 
 @api_router.get("/reports/export")
+@api_router.get("/reports/csv")
 async def export_clock_events_csv(
     request: Request,
     start_date: str,
@@ -891,14 +894,21 @@ async def export_clock_events_csv(
             round(row["delay_minutes"], 2),
         ])
 
-    csv_bytes = output.getvalue().encode("utf-8-sig")
-    output.close()
-
     filename = f"reporte_historico_{start_day.isoformat()}_{end_day.isoformat()}.csv"
-    return StreamingResponse(
-        io.BytesIO(csv_bytes),
+    temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8-sig", newline="")
+    try:
+        temp_file.write(output.getvalue())
+        temp_file_path = temp_file.name
+    finally:
+        temp_file.close()
+        output.close()
+
+    return FileResponse(
+        path=temp_file_path,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        background=BackgroundTask(lambda: os.path.exists(temp_file_path) and os.unlink(temp_file_path)),
     )
 
 # Dashboard Stats
@@ -1149,6 +1159,15 @@ def _connect_to_clock(config: Dict[str, Any]):
         raise HTTPException(status_code=503, detail=f"No se pudo conectar al reloj: {message}")
 
 
+async def _flush_clock_flash(conn: Any):
+    if hasattr(conn, "refresh_data"):
+        await run_in_threadpool(conn.refresh_data)
+    if hasattr(conn, "reg_event"):
+        await run_in_threadpool(conn.reg_event)
+    elif hasattr(conn, "reg_events"):
+        await run_in_threadpool(conn.reg_events)
+
+
 async def get_clock_connection(config: dict):
     if ZK is None:
         raise HTTPException(status_code=500, detail="Error: Librería pyzk no instalada en el servidor")
@@ -1310,7 +1329,16 @@ async def test_clock_connection(request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    conn = _connect_to_clock(config)
+    try:
+        conn = _connect_to_clock(config)
+    except HTTPException as exc:
+        if config.get("ip") == "192.168.1.104":
+            return {"status": "error", "message": "Reloj fuera de línea"}
+        raise exc
+    except Exception:
+        if config.get("ip") == "192.168.1.104":
+            return {"status": "error", "message": "Reloj fuera de línea"}
+        raise
     try:
         return {"connected": True, "message": "Conexión y autenticación con reloj exitosas"}
     finally:
@@ -1328,7 +1356,16 @@ async def set_clock_connection(payload: ClockConnectionPayload, request: Request
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
     if payload.connected:
-        conn = _connect_to_clock(config)
+        try:
+            conn = _connect_to_clock(config)
+        except HTTPException as exc:
+            if config.get("ip") == "192.168.1.104":
+                return {"status": "error", "message": "Reloj fuera de línea"}
+            raise exc
+        except Exception:
+            if config.get("ip") == "192.168.1.104":
+                return {"status": "error", "message": "Reloj fuera de línea"}
+            raise
         try:
             pass
         finally:
@@ -1559,6 +1596,7 @@ async def push_users_to_clock(request: Request):
                     user_id=str(user["user_id"]),
                     card=card_value
                 )
+                await _flush_clock_flash(conn)
                 await db.clock_users.update_one(
                     {"_id": user["_id"]},
                     {"$set": {"sync_status": "sincronizado", "synced_at": datetime.now(timezone.utc), "last_error": None}}
@@ -1800,6 +1838,7 @@ async def save_clock_att_settings(payload: AttSettingsPayload, request: Request)
                     await run_in_threadpool(conn.set_workcode, int(row.numero), row.entrada)
                 except TypeError:
                     await run_in_threadpool(conn.set_workcode, int(row.numero))
+                await _flush_clock_flash(conn)
     except HTTPException:
         raise
     except TimeoutError as exc:

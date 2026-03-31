@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8000';
+const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 
 const AuthContext = createContext(null);
 
@@ -25,6 +25,9 @@ export const AuthProvider = ({ children }) => {
       setUser(response.data);
     } catch (error) {
       setUser(false);
+      if (error.response?.status === 401 && window.location.pathname !== '/login') {
+        window.location.replace('/login');
+      }
     } finally {
       setLoading(false);
     }
