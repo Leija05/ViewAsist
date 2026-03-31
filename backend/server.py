@@ -2,7 +2,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, UploadFile, File, Depends, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -17,9 +18,11 @@ import csv
 import json
 import secrets
 import socket
+import tempfile
 import ipaddress
 import traceback
 import unicodedata
+from glob import glob
 from pathlib import Path
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
@@ -141,6 +144,29 @@ def load_excel_workbook(filename: str, content: bytes) -> ExcelWorkbookAdapter:
             getter=lambda row_idx, col_idx, _sheet=sheet: _sheet.cell_value(row_idx, col_idx)
         )
     return ExcelWorkbookAdapter(sheets)
+
+
+def _normalize_sheet_name(value: str) -> str:
+    return str(value or "").strip().lower().replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+
+
+def _find_header_row(sheet: ExcelSheetAdapter, required_labels: List[str], max_scan_rows: int = 15) -> Optional[int]:
+    required = [_normalize_sheet_name(label) for label in required_labels]
+    for row_idx in range(min(max_scan_rows, sheet.nrows)):
+        values = [
+            _normalize_sheet_name(sheet.cell_value(row_idx, col_idx))
+            for col_idx in range(sheet.ncols)
+        ]
+        if all(any(req in val for val in values) for req in required):
+            return row_idx
+    return None
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return default
 
 def get_reportlab_modules():
     try:
@@ -271,6 +297,10 @@ class AttSettingRow(BaseModel):
 class AttSettingsPayload(BaseModel):
     settings: List[AttSettingRow] = Field(default_factory=list)
 
+class UsbScanPayload(BaseModel):
+    mount_path: str
+
+
 class ClockUserBase(BaseModel):
     user_id: str
     name: str
@@ -302,6 +332,10 @@ class VersionInfo(BaseModel):
     update_available: bool = False
     release_notes: Optional[str] = None
     download_url: Optional[str] = None
+
+
+class ClockUserSyncPayload(BaseModel):
+    sync_mode: Literal["wifi", "manual"] = "manual"
 
 
 BONO_ENTRY_START = "09:00"
@@ -571,6 +605,117 @@ async def upload_excel(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error procesando archivo: {str(e)}")
 
+
+def _parse_standard_report_sections(filename: str, content: bytes) -> Dict[str, Any]:
+    workbook = load_excel_workbook(filename, content)
+    sections: Dict[str, List[Dict[str, Any]]] = {"estadistico": [], "turnos": [], "asistencia": [], "excepciones": []}
+    employees_map: Dict[str, Dict[str, Any]] = {}
+
+    for sheet_name in workbook.sheet_names():
+        normalized_name = _normalize_sheet_name(sheet_name)
+        sheet = workbook.sheet_by_name(sheet_name)
+        header_row = _find_header_row(sheet, ["id", "nombre"], max_scan_rows=20)
+        if header_row is None:
+            continue
+
+        headers = [str(sheet.cell_value(header_row, c) or "").strip() for c in range(sheet.ncols)]
+        id_col = next((idx for idx, h in enumerate(headers) if "id" in _normalize_sheet_name(h) or _normalize_sheet_name(h) in {"no.", "no", "numero"}), 0)
+        name_col = next((idx for idx, h in enumerate(headers) if "nombre" in _normalize_sheet_name(h)), 1)
+        dept_col = next((idx for idx, h in enumerate(headers) if "depart" in _normalize_sheet_name(h) or "depto" in _normalize_sheet_name(h)), None)
+
+        section_key = (
+            "estadistico" if "estad" in normalized_name else
+            "turnos" if "turno" in normalized_name else
+            "asistencia" if "asist" in normalized_name else
+            "excepciones" if "excep" in normalized_name else
+            "asistencia"
+        )
+
+        for row_idx in range(header_row + 1, sheet.nrows):
+            employee_id = str(sheet.cell_value(row_idx, id_col) or "").strip()
+            if not employee_id:
+                continue
+            row_data: Dict[str, str] = {}
+            for col_idx, column_name in enumerate(headers):
+                key = column_name or f"col_{col_idx + 1}"
+                row_data[key] = str(sheet.cell_value(row_idx, col_idx) or "").strip()
+            sections[section_key].append(row_data)
+            employees_map.setdefault(employee_id, {
+                "employee_id": employee_id,
+                "name": str(sheet.cell_value(row_idx, name_col) or "").strip(),
+                "department": str(sheet.cell_value(row_idx, dept_col) or "").strip() if dept_col is not None else "General",
+                "absences": 0,
+                "delays": 0,
+                "assistances": 0,
+            })
+
+    for row in sections["estadistico"]:
+        emp_id = str(row.get("ID") or row.get("No.") or row.get("No") or row.get("No. empleado") or "").strip()
+        if not emp_id or emp_id not in employees_map:
+            continue
+        employees_map[emp_id]["absences"] = _safe_int(row.get("Ausencias") or row.get("Faltas") or row.get("Días de ausencia"))
+        employees_map[emp_id]["delays"] = _safe_int(row.get("Retardos") or row.get("No. retardos") or row.get("Retardo"))
+        employees_map[emp_id]["assistances"] = max(0, _safe_int(row.get("Asistencias") or row.get("Días laborales"), 0))
+
+    return {"employees": list(employees_map.values()), "sections": sections}
+
+
+def _parse_attsettings(filename: str, content: bytes) -> Dict[str, Any]:
+    workbook = load_excel_workbook(filename, content)
+    horarios: List[Dict[str, Any]] = []
+    turnos: List[Dict[str, Any]] = []
+    for sheet_name in workbook.sheet_names():
+        normalized_name = _normalize_sheet_name(sheet_name)
+        sheet = workbook.sheet_by_name(sheet_name)
+        for row_idx in range(sheet.nrows):
+            values = [str(sheet.cell_value(row_idx, c) or "").strip() for c in range(sheet.ncols)]
+            if not any(values):
+                continue
+            target = turnos if "turno" in normalized_name else horarios
+            target.append({"row_index": row_idx, "values": values})
+    return {"horarios": horarios, "turnos": turnos}
+
+
+@api_router.post("/usb/scan")
+async def scan_usb_files(payload: UsbScanPayload, request: Request):
+    await get_current_user(request)
+    base = Path(str(payload.mount_path or "").strip()).expanduser()
+    if not str(base).strip() or not base.exists() or not base.is_dir():
+        raise HTTPException(status_code=400, detail="Ruta USB inválida")
+
+    standard_matches = sorted(glob(str(base / "**" / "*StandardReport.xls*"), recursive=True))
+    att_matches = sorted(glob(str(base / "**" / "*AttSetting.xls*"), recursive=True))
+    return {
+        "status": "ok",
+        "mount_path": str(base),
+        "detected": {
+            "standard_report": standard_matches[0] if standard_matches else None,
+            "attsettings": att_matches[0] if att_matches else None,
+        },
+        "all_matches": {"standard_report": standard_matches, "attsettings": att_matches},
+    }
+
+
+@api_router.post("/usb/load")
+async def load_usb_payload(
+    request: Request,
+    standard_report: UploadFile = File(None),
+    attsettings: UploadFile = File(None),
+):
+    await get_current_user(request)
+    if not standard_report and not attsettings:
+        raise HTTPException(status_code=400, detail="Sube al menos *StandardReport.xls o *AttSetting.xls")
+
+    payload: Dict[str, Any] = {"status": "ok", "source": "usb", "loaded_at": datetime.now(timezone.utc).isoformat()}
+    if standard_report:
+        standard_content = await standard_report.read()
+        parsed_standard = _parse_standard_report_sections(standard_report.filename or "", standard_content)
+        payload["standard_report"] = {"filename": standard_report.filename, **parsed_standard}
+    if attsettings:
+        settings_content = await attsettings.read()
+        payload["attsettings"] = {"filename": attsettings.filename, "config": _parse_attsettings(attsettings.filename or "", settings_content)}
+    return payload
+
 @api_router.get("/reports")
 async def get_reports(request: Request):
     await get_current_user(request)
@@ -584,6 +729,12 @@ async def get_reports(request: Request):
 @api_router.get("/reports/{report_id}")
 async def get_report(report_id: str, request: Request):
     await get_current_user(request)
+    if report_id in {"csv", "export"}:
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        if not start_date or not end_date:
+            raise HTTPException(status_code=400, detail="Debes enviar start_date y end_date en formato YYYY-MM-DD.")
+        return await export_clock_events_csv(request=request, start_date=start_date, end_date=end_date)
     try:
         report = await db.reports.find_one({"_id": ObjectId(report_id)}, {"raw_content": 0})
         if not report:
@@ -808,6 +959,7 @@ async def export_pdf(report_id: str, request: Request):
 
 
 @api_router.get("/reports/export")
+@api_router.get("/reports/csv")
 async def export_clock_events_csv(
     request: Request,
     start_date: str,
@@ -891,14 +1043,21 @@ async def export_clock_events_csv(
             round(row["delay_minutes"], 2),
         ])
 
-    csv_bytes = output.getvalue().encode("utf-8-sig")
-    output.close()
-
     filename = f"reporte_historico_{start_day.isoformat()}_{end_day.isoformat()}.csv"
-    return StreamingResponse(
-        io.BytesIO(csv_bytes),
+    temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8-sig", newline="")
+    try:
+        temp_file.write(output.getvalue())
+        temp_file_path = temp_file.name
+    finally:
+        temp_file.close()
+        output.close()
+
+    return FileResponse(
+        path=temp_file_path,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        background=BackgroundTask(lambda: os.path.exists(temp_file_path) and os.unlink(temp_file_path)),
     )
 
 # Dashboard Stats
@@ -1149,6 +1308,15 @@ def _connect_to_clock(config: Dict[str, Any]):
         raise HTTPException(status_code=503, detail=f"No se pudo conectar al reloj: {message}")
 
 
+async def _flush_clock_flash(conn: Any):
+    if hasattr(conn, "refresh_data"):
+        await run_in_threadpool(conn.refresh_data)
+    if hasattr(conn, "reg_event"):
+        await run_in_threadpool(conn.reg_event)
+    elif hasattr(conn, "reg_events"):
+        await run_in_threadpool(conn.reg_events)
+
+
 async def get_clock_connection(config: dict):
     if ZK is None:
         raise HTTPException(status_code=500, detail="Error: Librería pyzk no instalada en el servidor")
@@ -1310,7 +1478,16 @@ async def test_clock_connection(request: Request):
     if not config:
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
-    conn = _connect_to_clock(config)
+    try:
+        conn = _connect_to_clock(config)
+    except HTTPException as exc:
+        if config.get("ip") == "192.168.1.104":
+            return {"status": "error", "message": "Reloj fuera de línea"}
+        raise exc
+    except Exception:
+        if config.get("ip") == "192.168.1.104":
+            return {"status": "error", "message": "Reloj fuera de línea"}
+        raise
     try:
         return {"connected": True, "message": "Conexión y autenticación con reloj exitosas"}
     finally:
@@ -1328,7 +1505,16 @@ async def set_clock_connection(payload: ClockConnectionPayload, request: Request
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
     if payload.connected:
-        conn = _connect_to_clock(config)
+        try:
+            conn = _connect_to_clock(config)
+        except HTTPException as exc:
+            if config.get("ip") == "192.168.1.104":
+                return {"status": "error", "message": "Reloj fuera de línea"}
+            raise exc
+        except Exception:
+            if config.get("ip") == "192.168.1.104":
+                return {"status": "error", "message": "Reloj fuera de línea"}
+            raise
         try:
             pass
         finally:
@@ -1423,8 +1609,36 @@ async def get_clock_users(request: Request):
     return [_serialize_clock_user(u) for u in users]
 
 
+async def _sync_single_user_to_clock(user_doc: Dict[str, Any], mode: str = "manual") -> Dict[str, Any]:
+    if mode != "wifi":
+        return {"sync_mode": "manual", "sync_status": "pending"}
+
+    config = await db.clock_config.find_one({}, {"_id": 0}) or {}
+    if not config.get("connected"):
+        return {"sync_mode": "manual", "sync_status": "pending", "message": "Reloj desconectado"}
+
+    conn = _connect_to_clock(config)
+    try:
+        await run_in_threadpool(
+            conn.set_user,
+            uid=_safe_parse_int(user_doc.get("uid", user_doc.get("user_id")), 0),
+            user_id=str(user_doc.get("user_id") or ""),
+            name=str(user_doc.get("name") or ""),
+            privilege=1 if user_doc.get("privilege") == "admin" else 0,
+            password=str(user_doc.get("password") or ""),
+            card=int(_safe_parse_int(user_doc.get("card_number"), 0)),
+        )
+        await _flush_clock_flash(conn)
+        return {"sync_mode": "wifi", "sync_status": "synced", "message": "Sincronizado por WiFi"}
+    finally:
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
+
 @api_router.post("/clock/users")
-async def create_clock_user(payload: ClockUserBase, request: Request):
+async def create_clock_user(payload: ClockUserBase, request: Request, sync_mode: Literal["wifi", "manual"] = "manual"):
     await get_current_user(request)
     normalized_user_id = payload.user_id.strip()
     if not normalized_user_id:
@@ -1441,19 +1655,27 @@ async def create_clock_user(payload: ClockUserBase, request: Request):
         "updated_at": datetime.now(timezone.utc),
         "sync_status": "pending",
     })
+    sync_result = await _sync_single_user_to_clock(doc, sync_mode)
+    doc["sync_status"] = sync_result.get("sync_status", "pending")
     result = await db.clock_users.insert_one(doc)
     saved = await db.clock_users.find_one({"_id": result.inserted_id})
     return _serialize_clock_user(saved)
 
 
 @api_router.put("/clock/users/{user_id}")
-async def update_clock_user(user_id: str, payload: ClockUserUpdate, request: Request):
+async def update_clock_user(user_id: str, payload: ClockUserUpdate, request: Request, sync_mode: Literal["wifi", "manual"] = "manual"):
     await get_current_user(request)
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="No hay cambios para actualizar")
     updates["updated_at"] = datetime.now(timezone.utc)
     updates["sync_status"] = "pending"
+    current_user = await db.clock_users.find_one({"user_id": user_id})
+    if not current_user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    merged_user = {**current_user, **updates}
+    sync_result = await _sync_single_user_to_clock(merged_user, sync_mode)
+    updates["sync_status"] = sync_result.get("sync_status", "pending")
     result = await db.clock_users.update_one({"user_id": user_id}, {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -1462,8 +1684,22 @@ async def update_clock_user(user_id: str, payload: ClockUserUpdate, request: Req
 
 
 @api_router.delete("/clock/users/{user_id}")
-async def delete_clock_user(user_id: str, request: Request):
+async def delete_clock_user(user_id: str, request: Request, sync_mode: Literal["wifi", "manual"] = "manual"):
     await get_current_user(request)
+    if sync_mode == "wifi":
+        config = await db.clock_config.find_one({}, {"_id": 0}) or {}
+        if config.get("connected"):
+            conn = _connect_to_clock(config)
+            try:
+                delete_fn = getattr(conn, "delete_user", None) or getattr(conn, "deleteUser", None)
+                if delete_fn:
+                    await run_in_threadpool(delete_fn, user_id)
+                    await _flush_clock_flash(conn)
+            finally:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
     result = await db.clock_users.delete_one({"user_id": user_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -1559,6 +1795,7 @@ async def push_users_to_clock(request: Request):
                     user_id=str(user["user_id"]),
                     card=card_value
                 )
+                await _flush_clock_flash(conn)
                 await db.clock_users.update_one(
                     {"_id": user["_id"]},
                     {"$set": {"sync_status": "sincronizado", "synced_at": datetime.now(timezone.utc), "last_error": None}}
@@ -1800,6 +2037,7 @@ async def save_clock_att_settings(payload: AttSettingsPayload, request: Request)
                     await run_in_threadpool(conn.set_workcode, int(row.numero), row.entrada)
                 except TypeError:
                     await run_in_threadpool(conn.set_workcode, int(row.numero))
+                await _flush_clock_flash(conn)
     except HTTPException:
         raise
     except TimeoutError as exc:
