@@ -1423,24 +1423,28 @@ async def sync_clock_attendance(request: Request):
         clock_user_id = str(getattr(item, "user_id", "") or "").strip()
         if not clock_user_id or not isinstance(timestamp, datetime):
             continue
+        print(f"Procesando registro de Usuario ID: {clock_user_id} en fecha {timestamp}")
 
         id_candidates: List[Any] = [clock_user_id]
         if clock_user_id.isdigit():
             id_candidates.append(int(clock_user_id))
         employee_doc = await db.employees.find_one(
             {"internal_clock_id": {"$in": id_candidates}},
-            {"employee_id": 1}
+            {"employee_id": 1, "name": 1}
         )
         if not employee_doc:
             print(f"ID del reloj {clock_user_id} no encontrado en la base de datos")
             logger.info("ID del reloj %s no encontrado en la base de datos", clock_user_id)
             employee_id = "ID Desconocido"
+            employee_name = f"ID Reloj: {clock_user_id}"
         else:
             employee_id = str(employee_doc.get("employee_id", "") or "").strip() or "ID Desconocido"
+            employee_name = str(employee_doc.get("name", "") or "").strip() or f"ID Reloj: {clock_user_id}"
 
         record = {
             "employee_id": employee_id,
-            "timestamp": timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
+            "employee_name": employee_name,
+            "timestamp": timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp,
             "type": str(getattr(item, "status", getattr(item, "punch", 0))),
             "clock_user_id": clock_user_id,
         }
@@ -1456,7 +1460,7 @@ async def sync_clock_attendance(request: Request):
 
     await db.clock_config.update_one(
         {},
-        {"$set": {"connected": True, "last_sync": datetime.now(timezone.utc)}},
+        {"$set": {"connected": True, "last_sync": datetime.now()}},
         upsert=True
     )
 
