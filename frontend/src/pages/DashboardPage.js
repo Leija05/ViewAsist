@@ -517,6 +517,86 @@ const DashboardPage = () => {
     navigate('/login');
   };
 
+  const handleOpenBonusWindow = () => {
+    const employeesForBonus = dashboardData?.employees || [];
+    if (!employeesForBonus.length) {
+      toast.error('No hay empleados para calcular bonos');
+      return;
+    }
+
+    const escapeHtml = (value) => String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+
+    const rowsHtml = employeesForBonus.map((employee) => {
+      const bonusEligible = Number(employee.bonus_eligible_days || 0);
+      const bonusLost = Number(employee.bonus_lost_days || 0);
+      const absences = Number(employee.absence_days || 0);
+      const status = bonusEligible > 0 ? 'Con bono' : 'Sin bono';
+      return `
+        <tr>
+          <td>${escapeHtml(employee.employee_id)}</td>
+          <td>${escapeHtml(employee.name)}</td>
+          <td>${bonusEligible}</td>
+          <td>${bonusLost}</td>
+          <td>${absences}</td>
+          <td>${status}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const bonusWindow = escapeHtml(dashboardData?.statistics?.bonus_window || '09:00 a 09:30');
+    const notes = escapeHtml(dashboardData?.statistics?.bonus_policy_note || 'Después de ese horario ya no cuenta para bono.');
+
+    const reportWindow = window.open('', '_blank', 'width=980,height=700');
+    if (!reportWindow) {
+      toast.error('No se pudo abrir la ventana de bonos. Revisa bloqueador de pop-ups.');
+      return;
+    }
+
+    reportWindow.document.write(`
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <title>Bono de empleados</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
+            h1 { margin: 0 0 8px; }
+            p { margin: 0 0 10px; color: #444; }
+            table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+            th, td { border: 1px solid #d4d4d8; padding: 8px 10px; text-align: left; font-size: 14px; }
+            th { background: #f4f4f5; text-transform: uppercase; font-size: 12px; letter-spacing: .04em; }
+          </style>
+        </head>
+        <body>
+          <h1>Cálculo de bonos</h1>
+          <p><strong>Horario bono:</strong> ${bonusWindow}</p>
+          <p>${notes}</p>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Empleado</th>
+                <th>Días con bono</th>
+                <th>Días sin bono</th>
+                <th>Faltas</th>
+                <th>Estatus</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `);
+    reportWindow.document.close();
+  };
+
   const loadEmployeeHistory = async (employeeId, employeeName) => {
     try {
       const response = await axios.get(`${API_URL}/api/employees/${employeeId}/history`, { withCredentials: true });
@@ -588,6 +668,14 @@ const DashboardPage = () => {
                 <span className="text-sm font-medium">Cargar Excel</span>
               </div>
             </label>
+
+            <Button
+              variant="outline"
+              className="border-2 border-zinc-200 hover:border-black dark:border-zinc-700 dark:hover:border-zinc-300"
+              onClick={handleOpenBonusWindow}
+            >
+              Calcular bonos
+            </Button>
 
             <Button
               variant="outline"
