@@ -93,6 +93,7 @@ const DashboardPage = () => {
   const [clockUserDialogOpen, setClockUserDialogOpen] = useState(false);
   const [clockUserDialogMode, setClockUserDialogMode] = useState('create');
   const [editingClockUserId, setEditingClockUserId] = useState(null);
+  const [clockProcess, setClockProcess] = useState({ visible: false, status: 'loading', step: '', detail: '' });
   const [clockUserForm, setClockUserForm] = useState({
     user_id: '',
     name: '',
@@ -342,28 +343,47 @@ const DashboardPage = () => {
   };
 
   const handleTestClockConnection = async () => {
+    setClockProcess({ visible: true, status: 'loading', step: 'Conectando con el reloj...', detail: 'Validando IP, puerto y Comm Key' });
     try {
+      setClockProcess({ visible: true, status: 'loading', step: 'Autenticando con dispositivo...', detail: 'Esperando respuesta del reloj checador' });
       const response = await axios.post(`${API_URL}/api/clock/test-connection`, {}, { withCredentials: true });
       if (response.data.connected) {
         toast.success(response.data.message || 'Conexión exitosa con reloj');
+        setClockProcess({ visible: true, status: 'success', step: 'Conexión exitosa', detail: 'El reloj respondió correctamente' });
       } else {
         toast.error(response.data.message || 'No se pudo conectar con el reloj');
+        setClockProcess({ visible: true, status: 'error', step: 'Error de conexión', detail: response.data.message || 'No se pudo conectar con el reloj' });
       }
     } catch (error) {
-      toast.error(getClockErrorMessage(error, 'Error validando conexión del reloj'));
+      const detail = getClockErrorMessage(error, 'Error validando conexión del reloj');
+      toast.error(detail);
+      setClockProcess({ visible: true, status: 'error', step: 'Error de conexión', detail });
+      return;
     }
+    setTimeout(() => setClockProcess((prev) => ({ ...prev, visible: false })), 1000);
   };
 
   const handleSyncFromClock = async () => {
+    setClockProcess({ visible: true, status: 'loading', step: 'Sincronizando asistencias...', detail: 'Leyendo registros del reloj' });
     try {
       const response = await axios.post(`${API_URL}/api/clock/sync`, {}, { withCredentials: true });
       toast.success(`Sync completado: ${response.data.synced_records} registros`);
+      setClockProcess({
+        visible: true,
+        status: 'success',
+        step: 'Sincronización completada',
+        detail: `Detectados: ${response.data.detected_records || 0} | Insertados: ${response.data.inserted_records || response.data.synced_records || 0}`
+      });
       await fetchDashboardData();
       await fetchReports();
       await fetchClockConfig();
     } catch (error) {
-      toast.error(getClockErrorMessage(error, 'No se pudo sincronizar con el reloj'));
+      const detail = getClockErrorMessage(error, 'No se pudo sincronizar con el reloj');
+      toast.error(detail);
+      setClockProcess({ visible: true, status: 'error', step: 'Error al sincronizar', detail });
+      return;
     }
+    setTimeout(() => setClockProcess((prev) => ({ ...prev, visible: false })), 1100);
   };
 
   const handleToggleConnection = async (nextValue) => {
@@ -384,6 +404,9 @@ const DashboardPage = () => {
 
     try {
       if (nextValue) {
+        setClockProcess({ visible: true, status: 'loading', step: 'Conectando reloj...', detail: 'Guardando configuración y abriendo conexión' });
+      }
+      if (nextValue) {
         await axios.put(`${API_URL}/api/clock/config`, {
           ...clockConfig,
           ip: clockConfig.ip.trim(),
@@ -393,10 +416,21 @@ const DashboardPage = () => {
       }
       await axios.post(`${API_URL}/api/clock/connection`, { connected: nextValue }, { withCredentials: true });
       toast.success(nextValue ? 'Reloj conectado' : 'Reloj desconectado');
+      if (nextValue) {
+        setClockProcess({ visible: true, status: 'success', step: 'Reloj conectado', detail: 'Conexión establecida correctamente' });
+      }
       await fetchClockStatus();
       await fetchClockConfig();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudo cambiar el estado de conexión');
+      const detail = error.response?.data?.detail || 'No se pudo cambiar el estado de conexión';
+      toast.error(detail);
+      if (nextValue) {
+        setClockProcess({ visible: true, status: 'error', step: 'Error al conectar reloj', detail });
+      }
+      return;
+    }
+    if (nextValue) {
+      setTimeout(() => setClockProcess((prev) => ({ ...prev, visible: false })), 1000);
     }
   };
 
@@ -1450,6 +1484,25 @@ const DashboardPage = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {clockProcess.visible && (
+        <div className="fixed inset-0 z-[120] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 p-6 text-center shadow-2xl">
+            {clockProcess.status === 'loading' && <div className="loader w-12 h-12 mx-auto mb-4" />}
+            {clockProcess.status === 'success' && (
+              <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-green-100 text-green-700 flex items-center justify-center text-2xl">✓</div>
+            )}
+            {clockProcess.status === 'error' && (
+              <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-red-100 text-red-700 flex items-center justify-center text-2xl error-pulse">✕</div>
+            )}
+            <h3 className="text-lg font-bold mb-2">{clockProcess.step}</h3>
+            <p className="text-sm text-zinc-500 dark:text-zinc-300">{clockProcess.detail}</p>
+            {clockProcess.status === 'error' && (
+              <Button className="mt-4" onClick={() => setClockProcess((prev) => ({ ...prev, visible: false }))}>Cerrar</Button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
