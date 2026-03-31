@@ -1041,13 +1041,14 @@ async def get_clock_connection(config: dict):
             print(f"Intentando apertura de puerto 4370 UDP hacia {device_ip}....")
             zk_client = ZK(
                 device_ip,
-                port=device_port,
+                port=4370,
                 timeout=30,
                 password=device_password,
                 force_udp=force_udp,
                 ommit_ping=True
             )
             conn = await run_in_threadpool(zk_client.connect)
+            await run_in_threadpool(conn.set_time, datetime.now())
 
             # Limpieza/activación de sesión para evitar buffers colgados.
             try:
@@ -1072,6 +1073,7 @@ async def get_clock_connection(config: dict):
             return conn
         except Exception as exc:
             last_error = exc
+            print(traceback.format_exc())
             print(f"[CLOCK_SYNC] Intento {attempt}/3 fallido: {exc}")
             if attempt < 3:
                 await asyncio.sleep(2)
@@ -1488,7 +1490,7 @@ async def sync_clock_attendance(request: Request):
         if clock_user_id.isdigit():
             id_candidates.append(int(clock_user_id))
         employee_doc = await db.employees.find_one(
-            {"internal_clock_id": {"$in": id_candidates}},
+            {"employee_id": {"$in": id_candidates}},
             {"employee_id": 1, "name": 1}
         )
         if not employee_doc:
