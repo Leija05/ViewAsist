@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
@@ -93,6 +94,7 @@ const DashboardPage = () => {
   const [clockUserDialogOpen, setClockUserDialogOpen] = useState(false);
   const [clockUserDialogMode, setClockUserDialogMode] = useState('create');
   const [editingClockUserId, setEditingClockUserId] = useState(null);
+  const [clockProcess, setClockProcess] = useState({ visible: false, status: 'loading', step: '', detail: '' });
   const [clockUserForm, setClockUserForm] = useState({
     user_id: '',
     name: '',
@@ -342,28 +344,47 @@ const DashboardPage = () => {
   };
 
   const handleTestClockConnection = async () => {
+    setClockProcess({ visible: true, status: 'loading', step: 'Conectando con el reloj...', detail: 'Validando IP, puerto y Comm Key' });
     try {
+      setClockProcess({ visible: true, status: 'loading', step: 'Autenticando con dispositivo...', detail: 'Esperando respuesta del reloj checador' });
       const response = await axios.post(`${API_URL}/api/clock/test-connection`, {}, { withCredentials: true });
       if (response.data.connected) {
         toast.success(response.data.message || 'Conexión exitosa con reloj');
+        setClockProcess({ visible: true, status: 'success', step: 'Conexión exitosa', detail: 'El reloj respondió correctamente' });
       } else {
         toast.error(response.data.message || 'No se pudo conectar con el reloj');
+        setClockProcess({ visible: true, status: 'error', step: 'Error de conexión', detail: response.data.message || 'No se pudo conectar con el reloj' });
       }
     } catch (error) {
-      toast.error(getClockErrorMessage(error, 'Error validando conexión del reloj'));
+      const detail = getClockErrorMessage(error, 'Error validando conexión del reloj');
+      toast.error(detail);
+      setClockProcess({ visible: true, status: 'error', step: 'Error de conexión', detail });
+      return;
     }
+    setTimeout(() => setClockProcess((prev) => ({ ...prev, visible: false })), 1000);
   };
 
   const handleSyncFromClock = async () => {
+    setClockProcess({ visible: true, status: 'loading', step: 'Sincronizando asistencias...', detail: 'Leyendo registros del reloj' });
     try {
       const response = await axios.post(`${API_URL}/api/clock/sync`, {}, { withCredentials: true });
       toast.success(`Sync completado: ${response.data.synced_records} registros`);
+      setClockProcess({
+        visible: true,
+        status: 'success',
+        step: 'Sincronización completada',
+        detail: `Detectados: ${response.data.detected_records || 0} | Insertados: ${response.data.inserted_records || response.data.synced_records || 0}`
+      });
       await fetchDashboardData();
       await fetchReports();
       await fetchClockConfig();
     } catch (error) {
-      toast.error(getClockErrorMessage(error, 'No se pudo sincronizar con el reloj'));
+      const detail = getClockErrorMessage(error, 'No se pudo sincronizar con el reloj');
+      toast.error(detail);
+      setClockProcess({ visible: true, status: 'error', step: 'Error al sincronizar', detail });
+      return;
     }
+    setTimeout(() => setClockProcess((prev) => ({ ...prev, visible: false })), 1100);
   };
 
   const handleToggleConnection = async (nextValue) => {
@@ -384,6 +405,9 @@ const DashboardPage = () => {
 
     try {
       if (nextValue) {
+        setClockProcess({ visible: true, status: 'loading', step: 'Conectando reloj...', detail: 'Guardando configuración y abriendo conexión' });
+      }
+      if (nextValue) {
         await axios.put(`${API_URL}/api/clock/config`, {
           ...clockConfig,
           ip: clockConfig.ip.trim(),
@@ -393,10 +417,21 @@ const DashboardPage = () => {
       }
       await axios.post(`${API_URL}/api/clock/connection`, { connected: nextValue }, { withCredentials: true });
       toast.success(nextValue ? 'Reloj conectado' : 'Reloj desconectado');
+      if (nextValue) {
+        setClockProcess({ visible: true, status: 'success', step: 'Reloj conectado', detail: 'Conexión establecida correctamente' });
+      }
       await fetchClockStatus();
       await fetchClockConfig();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'No se pudo cambiar el estado de conexión');
+      const detail = error.response?.data?.detail || 'No se pudo cambiar el estado de conexión';
+      toast.error(detail);
+      if (nextValue) {
+        setClockProcess({ visible: true, status: 'error', step: 'Error al conectar reloj', detail });
+      }
+      return;
+    }
+    if (nextValue) {
+      setTimeout(() => setClockProcess((prev) => ({ ...prev, visible: false })), 1000);
     }
   };
 
@@ -517,6 +552,195 @@ const DashboardPage = () => {
     navigate('/login');
   };
 
+  const handleOpenBonusWindow = () => {
+    const employeesForBonus = dashboardData?.employees || [];
+    if (!employeesForBonus.length) {
+      toast.error('No hay empleados para calcular bonos');
+      return;
+    }
+
+    const escapeHtml = (value) => String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+
+    const rowsHtml = employeesForBonus.map((employee) => {
+      const hasBonusData = employee.bonus_eligible_days != null || employee.bonus_lost_days != null;
+      const bonusEligible = hasBonusData
+        ? Number(employee.bonus_eligible_days || 0)
+        : (Number(employee.absence_days || 0) === 0 && Number(employee.delay_count || 0) === 0 ? 1 : 0);
+      const bonusLost = hasBonusData
+        ? Number(employee.bonus_lost_days || 0)
+        : (bonusEligible > 0 ? 0 : 1);
+      const absences = Number(employee.absence_days || 0);
+      const status = bonusEligible > 0 ? 'Con bono' : 'Sin bono';
+      return `
+        <tr>
+          <td>${escapeHtml(employee.employee_id)}</td>
+          <td>${escapeHtml(employee.name)}</td>
+          <td>${bonusEligible}</td>
+          <td>${bonusLost}</td>
+          <td>${absences}</td>
+          <td>${status}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const bonusWindow = escapeHtml(dashboardData?.statistics?.bonus_window || '09:00 a 09:30');
+    const notes = escapeHtml(dashboardData?.statistics?.bonus_policy_note || 'Después de ese horario ya no cuenta para bono.');
+
+    const reportWindow = window.open('', '_blank', 'width=980,height=700');
+    if (!reportWindow) {
+      toast.error('No se pudo abrir la ventana de bonos. Revisa bloqueador de pop-ups.');
+      return;
+    }
+
+    reportWindow.document.write(`
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <title>Bono de empleados</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
+            h1 { margin: 0 0 8px; }
+            p { margin: 0 0 10px; color: #444; }
+            table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+            th, td { border: 1px solid #d4d4d8; padding: 8px 10px; text-align: left; font-size: 14px; }
+            th { background: #f4f4f5; text-transform: uppercase; font-size: 12px; letter-spacing: .04em; }
+          </style>
+        </head>
+        <body>
+          <h1>Cálculo de bonos</h1>
+          <p><strong>Horario bono:</strong> ${bonusWindow}</p>
+          <p>${notes}</p>
+          <p><strong>Condiciones:</strong> Entrada dentro del horario bono. Si llega después de 09:30, pierde bono. Las faltas no se descuentan para bono, pero sí se muestran para vacaciones.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Empleado</th>
+                <th>Días con bono</th>
+                <th>Días sin bono</th>
+                <th>Faltas</th>
+                <th>Estatus</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `);
+    reportWindow.document.close();
+  };
+
+  const handleOpenExcelInNewWindow = () => {
+    if (!excelPreview?.sheets) {
+      toast.error('No hay vista de Excel para abrir');
+      return;
+    }
+
+    const escapeHtml = (value) => String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+
+    const sheetsHtml = Object.entries(excelPreview.sheets).map(([sheetName, rows]) => {
+      const rowsHtml = rows.map((row, rowIdx) => `
+        <tr class="${rowIdx === 0 ? 'head' : ''}">
+          ${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}
+        </tr>
+      `).join('');
+
+      return `
+        <section>
+          <h2>${escapeHtml(sheetName)}</h2>
+          <div class="table-wrap">
+            <table>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        </section>
+      `;
+    }).join('');
+
+    const win = window.open('', '_blank', 'width=1300,height=850');
+    if (!win) {
+      toast.error('No se pudo abrir el Excel completo. Revisa bloqueador de pop-ups.');
+      return;
+    }
+
+    win.document.write(`
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <title>Vista completa Excel</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 16px; }
+            h1 { margin: 0 0 12px; }
+            h2 { margin: 18px 0 8px; font-size: 16px; }
+            .table-wrap { overflow: auto; border: 1px solid #d4d4d8; max-height: 65vh; }
+            table { border-collapse: collapse; min-width: 100%; }
+            td { border: 1px solid #e4e4e7; padding: 6px 8px; white-space: nowrap; font-size: 12px; }
+            tr.head td { background: #f4f4f5; font-weight: 700; }
+          </style>
+        </head>
+        <body>
+          <h1>Vista completa de Excel</h1>
+          <p>Archivo: ${escapeHtml(excelPreview.filename || 'Sin nombre')}</p>
+          ${sheetsHtml}
+        </body>
+      </html>
+    `);
+    win.document.close();
+  };
+
+  const closeClockProcessModal = () => {
+    setClockProcess({ visible: false, status: 'loading', step: '', detail: '' });
+  };
+
+  const clockProcessOverlay = clockProcess.visible
+    ? createPortal(
+      <div
+        className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          className="w-full max-w-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 p-6 text-center shadow-2xl pointer-events-auto"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex justify-end mb-2">
+            <Button variant="ghost" size="sm" onClick={closeClockProcessModal} aria-label="Cerrar modal de proceso del reloj">
+              <X className="w-4 h-4" />
+            </Button>
+          </div>
+          {clockProcess.status === 'loading' && <div className="loader w-12 h-12 mx-auto mb-4" />}
+          {clockProcess.status === 'success' && (
+            <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-green-100 text-green-700 flex items-center justify-center text-2xl">✓</div>
+          )}
+          {clockProcess.status === 'error' && (
+            <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-red-100 text-red-700 flex items-center justify-center text-2xl error-pulse">✕</div>
+          )}
+          <h3 className="text-lg font-bold mb-2">{clockProcess.step}</h3>
+          <p className="text-sm text-zinc-500 dark:text-zinc-300">{clockProcess.detail}</p>
+          {clockProcess.status === 'error' && (
+            <Button className="mt-4" onClick={closeClockProcessModal}>Cerrar</Button>
+          )}
+        </div>
+      </div>,
+      document.body
+    )
+    : null;
+
   const loadEmployeeHistory = async (employeeId, employeeName) => {
     try {
       const response = await axios.get(`${API_URL}/api/employees/${employeeId}/history`, { withCredentials: true });
@@ -588,6 +812,14 @@ const DashboardPage = () => {
                 <span className="text-sm font-medium">Cargar Excel</span>
               </div>
             </label>
+
+            <Button
+              variant="outline"
+              className="border-2 border-zinc-200 hover:border-black dark:border-zinc-700 dark:hover:border-zinc-300"
+              onClick={handleOpenBonusWindow}
+            >
+              Calcular bonos
+            </Button>
 
             <Button
               variant="outline"
@@ -1155,9 +1387,14 @@ const DashboardPage = () => {
                 <h3 className="font-semibold text-sm">Vista Previa Excel</h3>
                 <p className="text-xs text-zinc-500 truncate">{excelPreview.filename}</p>
               </div>
-              <Button variant="ghost" size="sm" onClick={() => setShowExcelPanel(false)} data-testid="close-excel-panel">
-                <X className="w-4 h-4" />
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" className="border-2" onClick={handleOpenExcelInNewWindow}>
+                  Abrir completo
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setShowExcelPanel(false)} data-testid="close-excel-panel">
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
             </div>
 
             {/* Sheet Tabs */}
@@ -1287,6 +1524,8 @@ const DashboardPage = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {clockProcessOverlay}
     </div>
   );
 };

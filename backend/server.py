@@ -6,21 +6,30 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from motor.motor_asyncio import AsyncIOMotorClient
-from zk import ZK
 from bson import ObjectId
 import os
 import logging
+import asyncio
 import bcrypt
 import jwt
 import io
 import secrets
 import socket
 import ipaddress
+import traceback
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
+
+try:
+    from zk import ZK
+except Exception:
+    ZK = None
+
+socket.setdefaulttimeout(20)
 
 
 ROOT_DIR = Path(__file__).parent
@@ -272,6 +281,16 @@ class VersionInfo(BaseModel):
     update_available: bool = False
     release_notes: Optional[str] = None
     download_url: Optional[str] = None
+
+
+BONO_ENTRY_START = "09:00"
+BONO_ENTRY_END = "09:30"
+ADMIN_SCHEDULES = {
+    "leonel puente": {"entry": "09:00", "exit": "18:00"},
+    "anahi espinoza": {"entry": "09:00", "exit": "17:00"},
+    "alejandro muñiz": {"entry": "11:00", "exit": "19:00"},
+    "alejandro muniz": {"entry": "11:00", "exit": "19:00"},
+}
 
 # Auth Routes
 @api_router.post("/auth/login")
@@ -838,6 +857,10 @@ async def get_employee_history(employee_id: str, request: Request):
     return history
 
 def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, Any], user_lookup: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def _normalize_name(value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(ch for ch in normalized if not unicodedata.combining(ch)).strip().lower()
+
     user_lookup = user_lookup or {}
     grouped: Dict[tuple, List[datetime]] = {}
 
@@ -852,6 +875,8 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
 
     entry_hour, entry_minute = map(int, settings.get("entry_time", "09:00").split(":"))
     tolerance_minutes = int(settings.get("tolerance_minutes", 30))
+    bono_start_h, bono_start_m = map(int, BONO_ENTRY_START.split(":"))
+    bono_end_h, bono_end_m = map(int, BONO_ENTRY_END.split(":"))
 
     attendance_records = []
     employee_summary: Dict[str, Dict[str, Any]] = {}
@@ -861,11 +886,21 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
         entry_time = punches[0]
         exit_time = punches[-1]
 
-        scheduled = datetime.fromisoformat(f"{date_str}T{entry_hour:02d}:{entry_minute:02d}:00").replace(tzinfo=timezone.utc)
+        employee_name = user_lookup.get(employee_id, f"Empleado {employee_id}")
+        employee_name_key = _normalize_name(employee_name)
+        custom_schedule = ADMIN_SCHEDULES.get(employee_name_key)
+        schedule_entry = custom_schedule["entry"] if custom_schedule else f"{entry_hour:02d}:{entry_minute:02d}"
+        schedule_entry_hour, schedule_entry_minute = map(int, schedule_entry.split(":"))
+
+        scheduled = datetime.fromisoformat(
+            f"{date_str}T{schedule_entry_hour:02d}:{schedule_entry_minute:02d}:00"
+        ).replace(tzinfo=timezone.utc)
         delay_minutes = max((entry_time - scheduled).total_seconds() / 60.0, 0)
         status = "retardo" if delay_minutes > tolerance_minutes else "presente"
+        bono_start_dt = datetime.fromisoformat(f"{date_str}T{bono_start_h:02d}:{bono_start_m:02d}:00").replace(tzinfo=timezone.utc)
+        bono_end_dt = datetime.fromisoformat(f"{date_str}T{bono_end_h:02d}:{bono_end_m:02d}:00").replace(tzinfo=timezone.utc)
+        bonus_aplica = bono_start_dt <= entry_time <= bono_end_dt
 
-        employee_name = user_lookup.get(employee_id, f"Empleado {employee_id}")
         attendance_records.append({
             "employee_id": employee_id,
             "name": employee_name,
@@ -877,6 +912,9 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
             "early_departure_minutes": 0,
             "absence_minutes": 0,
             "status": status,
+            "bonus_aplica": bonus_aplica,
+            "bonus_horario": f"{BONO_ENTRY_START} a {BONO_ENTRY_END}",
+            "admin_schedule": custom_schedule or None,
         })
 
         if employee_id not in employee_summary:
@@ -887,11 +925,17 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
                 "absence_days": 0,
                 "delay_count": 0,
                 "delay_minutes": 0,
+                "bonus_eligible_days": 0,
+                "bonus_lost_days": 0,
             }
 
         if status == "retardo":
             employee_summary[employee_id]["delay_count"] += 1
             employee_summary[employee_id]["delay_minutes"] += round(delay_minutes, 2)
+        if bonus_aplica:
+            employee_summary[employee_id]["bonus_eligible_days"] += 1
+        else:
+            employee_summary[employee_id]["bonus_lost_days"] += 1
 
     employees = list(employee_summary.values())
     statistics = {
@@ -899,6 +943,8 @@ def _summarize_clock_records(records: List[Dict[str, Any]], settings: Dict[str, 
         "total_absences": 0,
         "total_delays": sum(e["delay_count"] for e in employees),
         "total_delay_minutes": round(sum(e["delay_minutes"] for e in employees), 2),
+        "bonus_window": f"{BONO_ENTRY_START} a {BONO_ENTRY_END}",
+        "bonus_policy_note": "Después de ese horario ya no cuenta para bono. Las faltas se mantienen para control de vacaciones.",
     }
 
     return {
@@ -977,30 +1023,66 @@ def _connect_to_clock(config: Dict[str, Any]):
 
 
 async def get_clock_connection(config: dict):
+    if ZK is None:
+        raise HTTPException(status_code=500, detail="Error: Librería pyzk no instalada en el servidor")
+
     device_ip = str(config.get("ip", "") or "").strip()
     if not device_ip:
         raise HTTPException(status_code=400, detail="Ingresa la IP del reloj antes de conectar.")
 
     device_port = _safe_parse_int(config.get("port", 4370), 4370)
     device_password = _safe_parse_int(config.get("password", 0), 0)
-    force_udp = bool(config.get("force_udp", False))
+    force_udp = True
 
-    zk_client = ZK(
-        device_ip,
-        port=device_port,
-        timeout=15,
-        password=device_password,
-        force_udp=force_udp,
-        ommit_ping=False
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            socket.setdefaulttimeout(30)
+            print(f"Intentando apertura de puerto 4370 UDP hacia {device_ip}....")
+            zk_client = ZK(
+                device_ip,
+                port=4370,
+                timeout=30,
+                password=device_password,
+                force_udp=force_udp,
+                ommit_ping=True
+            )
+            conn = await run_in_threadpool(zk_client.connect)
+            await run_in_threadpool(conn.set_time, datetime.now())
+
+            # Limpieza/activación de sesión para evitar buffers colgados.
+            try:
+                if hasattr(conn, "free_data"):
+                    await run_in_threadpool(conn.free_data)
+                if hasattr(conn, "test_voice"):
+                    await run_in_threadpool(conn.test_voice)
+            except Exception as session_exc:
+                print(f"[CLOCK_SYNC] Aviso limpiando sesión previa: {session_exc}")
+
+            try:
+                before_time = await run_in_threadpool(conn.get_time)
+                print(f"[CLOCK_SYNC] Hora del reloj antes de sync: {before_time}")
+            except Exception as time_exc:
+                print(f"[CLOCK_SYNC] No se pudo leer hora antes de sync: {time_exc}")
+            await run_in_threadpool(conn.set_time, datetime.now())
+            try:
+                after_time = await run_in_threadpool(conn.get_time)
+                print(f"[CLOCK_SYNC] Hora del reloj después de sync: {after_time}")
+            except Exception as time_exc:
+                print(f"[CLOCK_SYNC] No se pudo leer hora después de sync: {time_exc}")
+            return conn
+        except Exception as exc:
+            last_error = exc
+            print(traceback.format_exc())
+            print(f"[CLOCK_SYNC] Intento {attempt}/3 fallido: {exc}")
+            if attempt < 3:
+                await asyncio.sleep(2)
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}) tras 3 intentos. "
+               f"Verifica red/puerto/comm key. Último error: {last_error}"
     )
-    try:
-        return await run_in_threadpool(zk_client.connect)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"No se pudo conectar al reloj ({device_ip}:{device_port}). "
-                   f"Verifica que esté encendido y en la misma red. Error: {exc}"
-        )
 
 
 def _serialize_clock_user(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -1377,10 +1459,13 @@ async def sync_clock_attendance(request: Request):
     skipped_duplicates = 0
     inserted_records = 0
     try:
+        print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
+        print("Conexión exitosa")
         await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
+        print(f"Registros encontrados: {detected_records}")
         print(f"[CLOCK_SYNC] Registros detectados por zk.get_attendance(): {detected_records}")
         logger.info("Registros detectados por zk.get_attendance(): %s", detected_records)
     except HTTPException:
@@ -1399,27 +1484,30 @@ async def sync_clock_attendance(request: Request):
         clock_user_id = str(getattr(item, "user_id", "") or "").strip()
         if not clock_user_id or not isinstance(timestamp, datetime):
             continue
+        print(f"Procesando registro de Usuario ID: {clock_user_id} en fecha {timestamp}")
 
         id_candidates: List[Any] = [clock_user_id]
         if clock_user_id.isdigit():
             id_candidates.append(int(clock_user_id))
         employee_doc = await db.employees.find_one(
-            {"internal_clock_id": {"$in": id_candidates}},
-            {"employee_id": 1}
+            {"employee_id": {"$in": id_candidates}},
+            {"employee_id": 1, "name": 1}
         )
         if not employee_doc:
             print(f"ID del reloj {clock_user_id} no encontrado en la base de datos")
             logger.info("ID del reloj %s no encontrado en la base de datos", clock_user_id)
-            continue
-
-        employee_id = str(employee_doc.get("employee_id", "") or "").strip()
-        if not employee_id:
-            continue
+            employee_id = "ID Desconocido"
+            employee_name = f"ID Reloj: {clock_user_id}"
+        else:
+            employee_id = str(employee_doc.get("employee_id", "") or "").strip() or "ID Desconocido"
+            employee_name = str(employee_doc.get("name", "") or "").strip() or f"ID Reloj: {clock_user_id}"
 
         record = {
             "employee_id": employee_id,
-            "timestamp": timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
+            "employee_name": employee_name,
+            "timestamp": timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp,
             "type": str(getattr(item, "status", getattr(item, "punch", 0))),
+            "clock_user_id": clock_user_id,
         }
         exists = await db.attendance_records.find_one(
             {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
@@ -1433,7 +1521,7 @@ async def sync_clock_attendance(request: Request):
 
     await db.clock_config.update_one(
         {},
-        {"$set": {"connected": True, "last_sync": datetime.now(timezone.utc)}},
+        {"$set": {"connected": True, "last_sync": datetime.now()}},
         upsert=True
     )
 
@@ -1461,7 +1549,9 @@ async def import_clock_users(request: Request):
     imported = 0
     skipped = 0
     try:
+        print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
+        print("Conexión exitosa")
         clock_users = await run_in_threadpool(conn.get_users)
 
         for user in clock_users or []:
@@ -1539,6 +1629,7 @@ def get_allowed_origins() -> List[str]:
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "*",
     })
     return sorted(expanded_origins)
 
@@ -1552,6 +1643,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def global_exception_trace_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        traceback.print_exc()
+        raise
 
 # Configure logging
 logging.basicConfig(
