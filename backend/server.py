@@ -1460,6 +1460,7 @@ async def sync_clock_attendance(request: Request):
         print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
         print("Conexión exitosa")
+        await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
         print(f"Registros encontrados: {detected_records}")

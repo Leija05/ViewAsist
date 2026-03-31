@@ -532,8 +532,13 @@ const DashboardPage = () => {
       .replaceAll("'", '&#039;');
 
     const rowsHtml = employeesForBonus.map((employee) => {
-      const bonusEligible = Number(employee.bonus_eligible_days || 0);
-      const bonusLost = Number(employee.bonus_lost_days || 0);
+      const hasBonusData = employee.bonus_eligible_days != null || employee.bonus_lost_days != null;
+      const bonusEligible = hasBonusData
+        ? Number(employee.bonus_eligible_days || 0)
+        : (Number(employee.absence_days || 0) === 0 && Number(employee.delay_count || 0) === 0 ? 1 : 0);
+      const bonusLost = hasBonusData
+        ? Number(employee.bonus_lost_days || 0)
+        : (bonusEligible > 0 ? 0 : 1);
       const absences = Number(employee.absence_days || 0);
       const status = bonusEligible > 0 ? 'Con bono' : 'Sin bono';
       return `
@@ -576,6 +581,7 @@ const DashboardPage = () => {
           <h1>Cálculo de bonos</h1>
           <p><strong>Horario bono:</strong> ${bonusWindow}</p>
           <p>${notes}</p>
+          <p><strong>Condiciones:</strong> Entrada dentro del horario bono. Si llega después de 09:30, pierde bono. Las faltas no se descuentan para bono, pero sí se muestran para vacaciones.</p>
           <table>
             <thead>
               <tr>
@@ -595,6 +601,70 @@ const DashboardPage = () => {
       </html>
     `);
     reportWindow.document.close();
+  };
+
+  const handleOpenExcelInNewWindow = () => {
+    if (!excelPreview?.sheets) {
+      toast.error('No hay vista de Excel para abrir');
+      return;
+    }
+
+    const escapeHtml = (value) => String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+
+    const sheetsHtml = Object.entries(excelPreview.sheets).map(([sheetName, rows]) => {
+      const rowsHtml = rows.map((row, rowIdx) => `
+        <tr class="${rowIdx === 0 ? 'head' : ''}">
+          ${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}
+        </tr>
+      `).join('');
+
+      return `
+        <section>
+          <h2>${escapeHtml(sheetName)}</h2>
+          <div class="table-wrap">
+            <table>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        </section>
+      `;
+    }).join('');
+
+    const win = window.open('', '_blank', 'width=1300,height=850');
+    if (!win) {
+      toast.error('No se pudo abrir el Excel completo. Revisa bloqueador de pop-ups.');
+      return;
+    }
+
+    win.document.write(`
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <title>Vista completa Excel</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 16px; }
+            h1 { margin: 0 0 12px; }
+            h2 { margin: 18px 0 8px; font-size: 16px; }
+            .table-wrap { overflow: auto; border: 1px solid #d4d4d8; max-height: 65vh; }
+            table { border-collapse: collapse; min-width: 100%; }
+            td { border: 1px solid #e4e4e7; padding: 6px 8px; white-space: nowrap; font-size: 12px; }
+            tr.head td { background: #f4f4f5; font-weight: 700; }
+          </style>
+        </head>
+        <body>
+          <h1>Vista completa de Excel</h1>
+          <p>Archivo: ${escapeHtml(excelPreview.filename || 'Sin nombre')}</p>
+          ${sheetsHtml}
+        </body>
+      </html>
+    `);
+    win.document.close();
   };
 
   const loadEmployeeHistory = async (employeeId, employeeName) => {
@@ -1243,9 +1313,14 @@ const DashboardPage = () => {
                 <h3 className="font-semibold text-sm">Vista Previa Excel</h3>
                 <p className="text-xs text-zinc-500 truncate">{excelPreview.filename}</p>
               </div>
-              <Button variant="ghost" size="sm" onClick={() => setShowExcelPanel(false)} data-testid="close-excel-panel">
-                <X className="w-4 h-4" />
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" className="border-2" onClick={handleOpenExcelInNewWindow}>
+                  Abrir completo
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setShowExcelPanel(false)} data-testid="close-excel-panel">
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
             </div>
 
             {/* Sheet Tabs */}
