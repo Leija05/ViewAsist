@@ -67,6 +67,8 @@ Comandos relevantes:
 - `yarn start` → solo frontend web.
 - `yarn dev:electron` → frontend + Electron para entorno local.
 - `yarn electron` → abre Electron contra build estático (`frontend/build`).
+- `yarn dist` → genera instaladores/artefactos de escritorio con `electron-builder`.
+- `yarn dist:win` → genera instalador `.exe` (NSIS) en `frontend/dist/`.
 
 ## Dependencia del reloj
 
