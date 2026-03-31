@@ -701,6 +701,10 @@ const DashboardPage = () => {
     win.document.close();
   };
 
+  const closeClockProcessModal = () => {
+    setClockProcess({ visible: false, status: 'loading', step: '', detail: '' });
+  };
+
   const loadEmployeeHistory = async (employeeId, employeeName) => {
     try {
       const response = await axios.get(`${API_URL}/api/employees/${employeeId}/history`, { withCredentials: true });
@@ -1488,6 +1492,11 @@ const DashboardPage = () => {
       {clockProcess.visible && (
         <div className="fixed inset-0 z-[120] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 p-6 text-center shadow-2xl">
+            <div className="flex justify-end mb-2">
+              <Button variant="ghost" size="sm" onClick={closeClockProcessModal} aria-label="Cerrar modal de proceso del reloj">
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
             {clockProcess.status === 'loading' && <div className="loader w-12 h-12 mx-auto mb-4" />}
             {clockProcess.status === 'success' && (
               <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-green-100 text-green-700 flex items-center justify-center text-2xl">✓</div>
@@ -1498,7 +1507,7 @@ const DashboardPage = () => {
             <h3 className="text-lg font-bold mb-2">{clockProcess.step}</h3>
             <p className="text-sm text-zinc-500 dark:text-zinc-300">{clockProcess.detail}</p>
             {clockProcess.status === 'error' && (
-              <Button className="mt-4" onClick={() => setClockProcess((prev) => ({ ...prev, visible: false }))}>Cerrar</Button>
+              <Button className="mt-4" onClick={closeClockProcessModal}>Cerrar</Button>
             )}
           </div>
         </div>
