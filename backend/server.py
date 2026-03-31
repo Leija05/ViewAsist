@@ -1475,15 +1475,32 @@ async def sync_clock_attendance(request: Request):
         raise HTTPException(status_code=400, detail="Configura primero el reloj checador")
 
     conn = None
+    attendance = []
     detected_records = 0
     skipped_duplicates = 0
     inserted_records = 0
+    inserted_absences = 0
+
+    rules = config.get("rules", []) or []
+    default_rule = next((r for r in rules if str(r.get("name", "")).strip().lower() == "turno general"), None)
+    if not default_rule and rules:
+        default_rule = rules[0]
+    if not default_rule:
+        default_rule = {"name": "Turno General", "expected_entry_time": "09:00", "tolerance_minutes": 30}
+
+    rule_by_name = {str(r.get("name", "")).strip(): r for r in rules if str(r.get("name", "")).strip()}
+
+    clock_users = await db.clock_users.find({}, {"user_id": 1, "work_schedule": 1}).to_list(5000)
+    schedule_by_clock_user = {
+        str(u.get("user_id", "")).strip(): str(u.get("work_schedule", "Turno General") or "Turno General").strip()
+        for u in clock_users
+        if str(u.get("user_id", "")).strip()
+    }
     try:
         print(f"Intentando conectar a IP: {config.get('ip')}:{config.get('port', 4370)}")
         conn = await get_clock_connection(config)
         print("Conexión exitosa")
         await run_in_threadpool(conn.disable_device)
-        await run_in_threadpool(conn.set_time, datetime.now())
         attendance = await run_in_threadpool(conn.get_attendance)
         detected_records = len(attendance or [])
         print(f"Registros encontrados: {detected_records}")
@@ -1506,6 +1523,8 @@ async def sync_clock_attendance(request: Request):
             except Exception:
                 pass
 
+    first_entry_by_user_date: Dict[str, Dict[datetime.date, Dict[str, Any]]] = {}
+
     for item in attendance or []:
         timestamp = getattr(item, "timestamp", None)
         clock_user_id = str(getattr(item, "user_id", "") or "").strip()
@@ -1514,6 +1533,8 @@ async def sync_clock_attendance(request: Request):
         if not clock_user_id or not isinstance(timestamp, datetime):
             continue
         print(f"Procesando registro de Usuario ID: {clock_user_id} en fecha {timestamp}")
+
+        normalized_ts = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
 
         id_candidates: List[Any] = [clock_user_id]
         if clock_user_id.isdigit():
@@ -1531,13 +1552,32 @@ async def sync_clock_attendance(request: Request):
             employee_id = str(employee_doc.get("employee_id", "") or "").strip() or "ID Desconocido"
             employee_name = str(employee_doc.get("name", "") or "").strip() or f"ID Reloj: {clock_user_id}"
 
+        schedule_name = schedule_by_clock_user.get(clock_user_id, "Turno General")
+        rule = rule_by_name.get(schedule_name) or default_rule
+        expected_entry_time = str(rule.get("expected_entry_time", default_rule.get("expected_entry_time", "09:00")) or "09:00")
+        tolerance_minutes = _safe_parse_int(rule.get("tolerance_minutes", default_rule.get("tolerance_minutes", 30)), 30)
+
+        try:
+            expected_hour, expected_minute = [int(part) for part in expected_entry_time.split(":", 1)]
+        except Exception:
+            expected_hour, expected_minute = 9, 0
+
+        scheduled_dt = normalized_ts.replace(hour=expected_hour, minute=expected_minute, second=0, microsecond=0)
+        delay_minutes = max((normalized_ts - scheduled_dt).total_seconds() / 60.0, 0.0)
+        status = "RETARDO" if delay_minutes > tolerance_minutes else "PRESENTE"
+
         record = {
             "employee_id": employee_id,
             "employee_name": employee_name,
-            "timestamp": timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp,
+            "timestamp": normalized_ts,
             "type": str(getattr(item, "status", getattr(item, "punch", 0))),
             "clock_user_id": clock_user_id,
             "source_device_id": source_device_id,
+            "work_schedule": schedule_name,
+            "expected_entry_time": expected_entry_time,
+            "tolerance_minutes": tolerance_minutes,
+            "delay_minutes": round(delay_minutes, 2),
+            "status": status,
         }
         exists = await db.attendance_records.find_one(
             {"employee_id": record["employee_id"], "timestamp": record["timestamp"]},
@@ -1549,6 +1589,91 @@ async def sync_clock_attendance(request: Request):
         await db.attendance_records.insert_one(record)
         inserted_records += 1
 
+        user_dates = first_entry_by_user_date.setdefault(clock_user_id, {})
+        day_key = normalized_ts.date()
+        previous = user_dates.get(day_key)
+        if previous is None or normalized_ts < previous["timestamp"]:
+            user_dates[day_key] = {
+                "timestamp": normalized_ts,
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                "work_schedule": schedule_name,
+                "expected_entry_time": expected_entry_time,
+                "tolerance_minutes": tolerance_minutes,
+            }
+
+    if attendance:
+        min_date = min(
+            (getattr(item, "timestamp", datetime.now()) for item in attendance if isinstance(getattr(item, "timestamp", None), datetime)),
+            default=datetime.now()
+        ).date()
+        max_date = max(
+            (getattr(item, "timestamp", datetime.now()) for item in attendance if isinstance(getattr(item, "timestamp", None), datetime)),
+            default=datetime.now()
+        ).date()
+    else:
+        today = datetime.now().date()
+        min_date = today
+        max_date = today
+
+    all_employee_docs = await db.employees.find({}, {"employee_id": 1, "name": 1, "internal_clock_id": 1}).to_list(5000)
+    employee_by_clock_id: Dict[str, Dict[str, str]] = {}
+    for doc in all_employee_docs:
+        internal_clock_id = str(doc.get("internal_clock_id", "") or "").strip()
+        if internal_clock_id:
+            employee_by_clock_id[internal_clock_id] = {
+                "employee_id": str(doc.get("employee_id", "") or "").strip() or "ID Desconocido",
+                "employee_name": str(doc.get("name", "") or "").strip() or f"ID Reloj: {internal_clock_id}",
+            }
+
+    for clock_user_id, schedule_name in schedule_by_clock_user.items():
+        rule = rule_by_name.get(schedule_name) or default_rule
+        expected_entry_time = str(rule.get("expected_entry_time", default_rule.get("expected_entry_time", "09:00")) or "09:00")
+        tolerance_minutes = _safe_parse_int(rule.get("tolerance_minutes", default_rule.get("tolerance_minutes", 30)), 30)
+        try:
+            expected_hour, expected_minute = [int(part) for part in expected_entry_time.split(":", 1)]
+        except Exception:
+            expected_hour, expected_minute = 9, 0
+
+        employee_info = employee_by_clock_id.get(clock_user_id, {
+            "employee_id": "ID Desconocido",
+            "employee_name": f"ID Reloj: {clock_user_id}",
+        })
+        existing_days = set(first_entry_by_user_date.get(clock_user_id, {}).keys())
+
+        current_date = min_date
+        while current_date <= max_date:
+            if current_date.weekday() < 5 and current_date not in existing_days:
+                absence_timestamp = datetime.combine(current_date, datetime.min.time()).replace(
+                    hour=expected_hour,
+                    minute=expected_minute,
+                )
+                absence_record = {
+                    "employee_id": employee_info["employee_id"],
+                    "employee_name": employee_info["employee_name"],
+                    "timestamp": absence_timestamp,
+                    "type": "FALTA",
+                    "clock_user_id": clock_user_id,
+                    "source_device_id": "1",
+                    "work_schedule": schedule_name,
+                    "expected_entry_time": expected_entry_time,
+                    "tolerance_minutes": tolerance_minutes,
+                    "delay_minutes": None,
+                    "status": "FALTA",
+                }
+                absence_exists = await db.attendance_records.find_one(
+                    {
+                        "clock_user_id": clock_user_id,
+                        "timestamp": absence_timestamp,
+                        "status": "FALTA",
+                    },
+                    {"_id": 1}
+                )
+                if not absence_exists:
+                    await db.attendance_records.insert_one(absence_record)
+                    inserted_absences += 1
+            current_date = current_date + timedelta(days=1)
+
     await db.clock_config.update_one(
         {},
         {"$set": {"connected": True, "last_sync": datetime.now()}},
@@ -1558,10 +1683,10 @@ async def sync_clock_attendance(request: Request):
     return ClockSyncResponse(
         synced_records=inserted_records,
         generated_report_id=None,
-        message="Sincronización completada desde el reloj checador",
+        message=f"Sincronización completada desde el reloj checador. Faltas generadas: {inserted_absences}",
         detected_records=detected_records,
         skipped_duplicates=skipped_duplicates,
-        inserted_records=inserted_records,
+        inserted_records=inserted_records + inserted_absences,
     )
 
 
