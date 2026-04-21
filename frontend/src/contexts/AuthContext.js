@@ -14,7 +14,7 @@ export const useAuth = () => {
 };
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null); // null = checking, false = not auth, object = auth
+  const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const checkAuth = useCallback(async () => {
@@ -44,11 +44,36 @@ export const AuthProvider = ({ children }) => {
     return response.data;
   };
 
+  const register = async ({ name, email, phone, password, confirmPassword }) => {
+    const response = await axios.post(
+      `${API_URL}/api/auth/register`,
+      {
+        name,
+        email,
+        phone,
+        password,
+        confirm_password: confirmPassword
+      },
+      { withCredentials: true }
+    );
+    return response.data;
+  };
+
+  const verifyRegistrationOtp = async ({ phone, otp }) => {
+    const response = await axios.post(
+      `${API_URL}/api/auth/verify-registration-otp`,
+      { phone, otp },
+      { withCredentials: true }
+    );
+    setUser(response.data.user);
+    return response.data;
+  };
+
   const logout = async () => {
     try {
       await axios.post(`${API_URL}/api/auth/logout`, {}, { withCredentials: true });
     } catch (error) {
-      // Ignore error
+      // Ignore logout errors on UI
     }
     setUser(false);
   };
@@ -57,6 +82,8 @@ export const AuthProvider = ({ children }) => {
     user,
     loading,
     login,
+    register,
+    verifyRegistrationOtp,
     logout,
     isAuthenticated: !!user && user !== false,
     checkAuth

@@ -16,6 +16,7 @@ import io
 import csv
 import json
 import secrets
+import re
 import socket
 import ipaddress
 import traceback
@@ -201,6 +202,22 @@ class LoginRequest(BaseModel):
     password: str
     remember_me: bool = True
 
+class RegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    email: EmailStr
+    phone: str = Field(..., min_length=10, max_length=20)
+    password: str = Field(..., min_length=8, max_length=128)
+    confirm_password: str = Field(..., min_length=8, max_length=128)
+
+class VerifyRegistrationOtpRequest(BaseModel):
+    phone: str
+    otp: str
+
+class CollisionNotificationRequest(BaseModel):
+    phone: str
+    telemetry: Dict[str, Any]
+    threshold: float
+
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -313,6 +330,73 @@ ADMIN_SCHEDULES = {
     "alejandro muniz": {"entry": "11:00", "exit": "19:00"},
 }
 
+WHATSAPP_TEMPLATE_FALLBACK_ON_24H = os.environ.get("WHATSAPP_TEMPLATE_FALLBACK_ON_24H", "true").lower() == "true"
+
+def sanitize_mx_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if digits.startswith("52") and len(digits) == 12:
+        return f"+{digits}"
+    if len(digits) == 10:
+        return f"+52{digits}"
+    if digits.startswith("521") and len(digits) == 13:
+        return f"+52{digits[3:]}"
+    raise HTTPException(status_code=400, detail="Número de teléfono inválido. Usa formato mexicano (+52XXXXXXXXXX).")
+
+def validate_password_strength(password: str) -> None:
+    checks = [
+        (len(password) >= 8, "mínimo 8 caracteres"),
+        (bool(re.search(r"[A-Z]", password)), "al menos una mayúscula"),
+        (bool(re.search(r"\d", password)), "al menos un número"),
+        (bool(re.search(r"[^A-Za-z0-9]", password)), "al menos un símbolo"),
+    ]
+    failed = [message for ok, message in checks if not ok]
+    if failed:
+        raise HTTPException(status_code=400, detail=f"Contraseña débil: {', '.join(failed)}.")
+
+def _build_whatsapp_template_payload(phone: str, template_name: str, body_parameters: Optional[List[str]] = None) -> Dict[str, Any]:
+    components = []
+    if body_parameters:
+        components.append(
+            {
+                "type": "body",
+                "parameters": [{"type": "text", "text": value} for value in body_parameters],
+            }
+        )
+    return {
+        "messaging_product": "whatsapp",
+        "to": phone,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": "es_MX"},
+            "components": components,
+        },
+    }
+
+async def send_whatsapp_template_message(phone: str, template_name: str, body_parameters: Optional[List[str]] = None) -> Dict[str, Any]:
+    token = os.environ.get("WHATSAPP_ACCESS_TOKEN")
+    phone_number_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
+    if not token or not phone_number_id:
+        logger.warning("WhatsApp Cloud API credentials not configured. Message mocked.")
+        return {"status": "mocked", "template": template_name, "to": phone}
+
+    import httpx
+    url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
+    payload = _build_whatsapp_template_payload(phone=phone, template_name=template_name, body_parameters=body_parameters)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=20) as client_http:
+        response = await client_http.post(url, headers=headers, json=payload)
+    if response.status_code >= 400:
+        detail = response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+        if WHATSAPP_TEMPLATE_FALLBACK_ON_24H:
+            logger.warning(f"WhatsApp template failed; fallback on 24h enabled: {detail}")
+            return {"status": "fallback_24h", "template": template_name, "detail": detail}
+        raise HTTPException(status_code=502, detail=f"WhatsApp API error: {detail}")
+    return {"status": "sent", "template": template_name, "provider_response": response.json()}
+
 # Auth Routes
 @api_router.post("/auth/login")
 async def login(request: LoginRequest, response: Response):
@@ -397,6 +481,120 @@ async def refresh_token(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Token de refresh expirado")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token inválido")
+
+@api_router.post("/auth/register")
+async def register_user(request: RegisterRequest):
+    email = request.email.lower().strip()
+    phone = sanitize_mx_phone(request.phone)
+    if request.password != request.confirm_password:
+        raise HTTPException(status_code=400, detail="La contraseña y su confirmación no coinciden.")
+    validate_password_strength(request.password)
+
+    existing_user = await db.users.find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Ya existe una cuenta con ese correo.")
+
+    otp = f"{secrets.randbelow(1000000):06d}"
+    otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    await db.users.insert_one(
+        {
+            "name": request.name.strip(),
+            "email": email,
+            "phone": phone,
+            "password_hash": hash_password(request.password),
+            "role": "driver",
+            "is_phone_verified": False,
+            "registration_otp": otp,
+            "registration_otp_expires_at": otp_expires_at,
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+
+    await send_whatsapp_template_message(
+        phone=phone,
+        template_name="crash_verification_token",
+        body_parameters=[otp],
+    )
+
+    return {
+        "message": "Cuenta creada. Se envió OTP de verificación por WhatsApp.",
+        "phone": phone,
+        "template": "crash_verification_token",
+        "locale": "es_MX",
+    }
+
+@api_router.post("/auth/verify-registration-otp")
+async def verify_registration_otp(request: VerifyRegistrationOtpRequest, response: Response):
+    phone = sanitize_mx_phone(request.phone)
+    user = await db.users.find_one({"phone": phone})
+    if not user:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada para ese número.")
+    if user.get("is_phone_verified"):
+        raise HTTPException(status_code=400, detail="El número ya fue verificado.")
+
+    otp_expires_at = user.get("registration_otp_expires_at")
+    if not otp_expires_at or datetime.now(timezone.utc) > otp_expires_at:
+        raise HTTPException(status_code=400, detail="El OTP expiró. Solicita uno nuevo.")
+    if request.otp.strip() != (user.get("registration_otp") or ""):
+        raise HTTPException(status_code=400, detail="OTP inválido.")
+
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {"is_phone_verified": True, "updated_at": datetime.now(timezone.utc)},
+            "$unset": {"registration_otp": "", "registration_otp_expires_at": ""},
+        },
+    )
+
+    access_token = create_access_token(str(user["_id"]), user["email"])
+    refresh_token = create_refresh_token(str(user["_id"]))
+    response.set_cookie("access_token", access_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie("refresh_token", refresh_token, httponly=True, secure=False, samesite="lax", max_age=2592000, path="/")
+
+    return {
+        "message": "Número verificado correctamente.",
+        "user": {
+            "id": str(user["_id"]),
+            "email": user["email"],
+            "name": user["name"],
+            "role": user.get("role", "driver"),
+            "phone": phone,
+        },
+    }
+
+@api_router.post("/notifications/collision")
+async def notify_collision(request: Request, payload: CollisionNotificationRequest):
+    user = await get_current_user(request)
+    destination_phone = sanitize_mx_phone(payload.phone)
+    telemetry = payload.telemetry or {}
+    impact = float(telemetry.get("magnitudG", 0))
+    if impact < payload.threshold:
+        raise HTTPException(status_code=400, detail="No se envió alerta: magnitud G por debajo del umbral.")
+
+    msg_result = await send_whatsapp_template_message(
+        phone=destination_phone,
+        template_name="crash_collision_diagnosis",
+        body_parameters=[
+            user.get("name", "Conductor"),
+            f"{impact:.2f}",
+            f"{payload.threshold:.2f}",
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        ],
+    )
+
+    await db.collision_events.insert_one(
+        {
+            "user_id": user.get("_id") or user.get("id"),
+            "phone": destination_phone,
+            "telemetry": telemetry,
+            "threshold": payload.threshold,
+            "template": "crash_collision_diagnosis",
+            "created_at": datetime.now(timezone.utc),
+            "notification_result": msg_result,
+        }
+    )
+    return {"message": "Notificación de colisión procesada.", "result": msg_result}
 
 # Excel Processing
 @api_router.post("/upload/excel")
