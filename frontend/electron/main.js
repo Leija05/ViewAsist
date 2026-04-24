@@ -26,7 +26,7 @@ function appendBackendStderr(chunk) {
 
 function getBackendStartupHelp() {
   if (!backendExitInfo) {
-    return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que MongoDB esté disponible y vuelve a intentar.`;
+    return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que Python y las dependencias del backend estén instaladas y vuelve a intentar.`;
   }
 
   const moduleMissingLine = backendStderrBuffer.find((line) => line.includes('ModuleNotFoundError:'));
@@ -95,8 +95,6 @@ async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
     cwd: projectRoot,
     env: {
       ...process.env,
-      MONGO_URL: process.env.MONGO_URL || 'mongodb://127.0.0.1:27017',
-      DB_NAME: process.env.DB_NAME || 'viewasist',
       FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],

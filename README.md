@@ -2,42 +2,33 @@
 
 Sistema de control de asistencia con:
 
-- Backend FastAPI + MongoDB para autenticación, reportes y sincronización con reloj checador.
-- Frontend React para dashboard, reglas de asistencia, configuración del reloj y generación de reportes.
-- Setup con Electron para operar la app como escritorio.
+- **Backend FastAPI** en memoria (sin base de datos).
+- **Frontend React** para autenticación, carga de Excel, reportes y configuración general.
+- **Electron** para ejecución como app de escritorio.
 
-## Configuración del reloj checador
+## Cambios importantes
 
-Desde el Dashboard > Configuración:
+- Se removió toda la integración con **reloj checador** (`/api/clock/*`).
+- Se removió la dependencia de **MongoDB**.
+- El backend queda listo para correr en **puerto 8000** por defecto.
 
-1. Configura IP, puerto y contraseña (Comm Key).
-2. Guarda la configuración del reloj.
-3. Prueba conexión TCP con el reloj.
-4. Puedes **conectar / desconectar** el reloj para cambiar a otro dispositivo.
-5. Administra usuarios (agregar, editar, borrar), verifica banderas de biometría (huella/rostro/vena) y horario.
-6. Usa **Importar usuarios del reloj** y **Subir usuarios al reloj (Wi-Fi)** para sincronización bidireccional.
-7. Ejecuta **Sincronizar Asistencias del Reloj** para crear un reporte directo desde eventos del dispositivo.
-8. Revisa asistencias en tiempo real desde el panel “Centro de Reloj Checador”.
+## Ejecutar backend (FastAPI en puerto 8000)
 
-El backend expone:
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+```
 
-- `GET /api/clock/config`
-- `PUT /api/clock/config`
-- `POST /api/clock/test-connection`
-- `POST /api/clock/connection`
-- `GET /api/clock/status`
-- `GET /api/clock/device-info`
-- `GET /api/clock/users`
-- `POST /api/clock/users`
-- `PUT /api/clock/users/{user_id}`
-- `DELETE /api/clock/users/{user_id}`
-- `POST /api/clock/users/pull`
-- `POST /api/clock/users/push`
-- `POST /api/clock/sync`
-- `GET /api/clock/events`
-- `GET /api/clock/attendance/live`
+## Ejecutar frontend web
 
-## Electron (frontend)
+```bash
+cd frontend
+yarn install
+yarn start
+```
+
+## Ejecutar app de escritorio (Electron)
 
 ```bash
 cd frontend
@@ -45,31 +36,16 @@ yarn install
 yarn dev:electron
 ```
 
-Al abrir Electron, ahora la app intenta:
+Electron levantará el backend automáticamente usando `uvicorn backend.server:app` en el puerto `8000`.
 
-1. Levantar automáticamente el backend FastAPI (`backend.server:app`).
-2. Conectarse a MongoDB usando por defecto `MONGO_URL=mongodb://127.0.0.1:27017`.
-3. Esperar a que la API responda en `http://127.0.0.1:8000` antes de abrir la ventana.
+## Credenciales por defecto
 
-Si quieres personalizar rutas/puertos:
+- Email: `admin@empresa.com`
+- Contraseña: `admin123`
+
+Puedes sobrescribirlas con variables de entorno:
 
 ```bash
-MONGO_URL=mongodb://127.0.0.1:27017 \
-DB_NAME=viewasist \
-BACKEND_HOST=127.0.0.1 \
-BACKEND_PORT=8000 \
-ELECTRON_PYTHON_PATH=python3 \
-yarn dev:electron
+ADMIN_EMAIL=tu_correo@empresa.com
+ADMIN_PASSWORD=tu_password_seguro
 ```
-
-Comandos relevantes:
-
-- `yarn start` → solo frontend web.
-- `yarn dev:electron` → frontend + Electron para entorno local.
-- `yarn electron` → abre Electron contra build estático (`frontend/build`).
-- `yarn dist` → genera instaladores/artefactos de escritorio con `electron-builder`.
-- `yarn dist:win` → genera instalador `.exe` (NSIS) en `frontend/dist/`.
-
-## Dependencia del reloj
-
-El backend usa `pyzk` para comunicación con equipos compatibles en puerto `4370`.
