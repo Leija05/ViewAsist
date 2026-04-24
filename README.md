@@ -12,7 +12,7 @@ Sistema de control de asistencia con:
 - Se removió la dependencia de **MongoDB**.
 - El backend queda listo para correr en **puerto 8000** por defecto.
 
-## Ejecutar backend (FastAPI en puerto 8000)
+## Ejecutar backend (modo desarrollo)
 
 ```bash
 cd backend
@@ -28,7 +28,7 @@ yarn install
 yarn start
 ```
 
-## Ejecutar app de escritorio (Electron)
+## Ejecutar app de escritorio (Electron dev)
 
 ```bash
 cd frontend
@@ -36,7 +36,29 @@ yarn install
 yarn dev:electron
 ```
 
-Electron levantará el backend automáticamente usando `uvicorn backend.server:app` en el puerto `8000`.
+Electron intentará levantar el backend automáticamente en `http://127.0.0.1:8000`.
+
+## Generar instalador Windows con `server.exe` embebido
+
+> Objetivo: que la app instalada arranque el backend sin abrir terminal ni requerir ejecutar comandos manuales.
+
+```bash
+cd frontend
+yarn install
+yarn dist:win
+```
+
+`dist:win` ahora hace esto:
+
+1. Ejecuta `build:backend:exe`.
+2. Genera `backend/dist/server.exe` con **PyInstaller** usando `backend/run_server.py`.
+3. Empaqueta Electron e incluye `server.exe` dentro de `resources/backend/dist` del instalador.
+4. Al abrir la app instalada, Electron inicia `server.exe` automáticamente y apunta al puerto `8000`.
+
+### Requisitos para empaquetar
+
+- Python 3 instalado en la máquina de build.
+- Permiso para instalar/usar `pyinstaller` (el script lo instala automáticamente con `pip`).
 
 ## Credenciales por defecto
 

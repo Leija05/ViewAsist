@@ -1,14 +1,16 @@
 const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { spawn } = require('child_process');
 const http = require('http');
 
 const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
 const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8000);
 const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
-const projectRoot = path.resolve(__dirname, '..', '..');
-
 const isPackaged = app.isPackaged;
+const projectRoot = path.resolve(__dirname, '..', '..');
+const packagedBackendRoot = path.join(process.resourcesPath, 'backend');
+
 let backendProcess = null;
 let backendExitInfo = null;
 const backendStderrBuffer = [];
@@ -26,6 +28,9 @@ function appendBackendStderr(chunk) {
 
 function getBackendStartupHelp() {
   if (!backendExitInfo) {
+    if (isPackaged) {
+      return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que server.exe exista en resources/backend/dist y vuelve a instalar la app.`;
+    }
     return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que Python y las dependencias del backend estén instaladas y vuelve a intentar.`;
   }
 
@@ -36,7 +41,7 @@ function getBackendStartupHelp() {
     ? `El backend terminó por señal ${backendExitInfo.signal}.`
     : `El backend terminó con código ${backendExitInfo.code}.`;
 
-  if (missingModuleMatch) {
+  if (!isPackaged && missingModuleMatch) {
     return `${processSummary}\n\nFalta el módulo de Python "${missingModuleMatch[1]}".\nInstala dependencias del backend (por ejemplo: pip install -r backend/requirements.txt) y vuelve a intentar.`;
   }
 
@@ -59,6 +64,14 @@ function getPythonCandidates() {
   return [
     ['python3', []],
     ['python', []],
+  ];
+}
+
+function getPackagedBackendCandidates() {
+  return [
+    path.join(packagedBackendRoot, 'dist', 'server.exe'),
+    path.join(packagedBackendRoot, 'dist', 'server'),
+    path.join(packagedBackendRoot, 'server.exe'),
   ];
 }
 
@@ -87,17 +100,20 @@ async function waitForBackend(maxAttempts = 40, delayMs = 500) {
   return false;
 }
 
-async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
+async function spawnBackendProcess(command, args, cwdDir) {
   backendExitInfo = null;
   backendStderrBuffer.length = 0;
 
-  const child = spawn(pythonCmd, [...pythonCmdArgs, ...backendArgs], {
-    cwd: projectRoot,
+  const child = spawn(command, args, {
+    cwd: cwdDir,
     env: {
       ...process.env,
       FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+      BACKEND_HOST,
+      BACKEND_PORT: String(BACKEND_PORT),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 
   await new Promise((resolve, reject) => {
@@ -119,6 +135,17 @@ async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
   return child;
 }
 
+async function startPackagedBackend() {
+  const candidates = getPackagedBackendCandidates();
+  const executable = candidates.find((candidate) => fs.existsSync(candidate));
+
+  if (!executable) {
+    throw new Error(`No se encontró server.exe en recursos: ${candidates.join(', ')}`);
+  }
+
+  await spawnBackendProcess(executable, [], path.dirname(executable));
+}
+
 function startBackendIfNeeded() {
   return new Promise(async (resolve, reject) => {
     const alreadyRunning = await isBackendHealthy();
@@ -127,17 +154,26 @@ function startBackendIfNeeded() {
       return;
     }
 
+    if (isPackaged) {
+      try {
+        await startPackagedBackend();
+        resolve(true);
+      } catch (error) {
+        reject(error);
+      }
+      return;
+    }
+
     const backendArgs = ['-m', 'uvicorn', 'backend.server:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)];
     const pythonCandidates = getPythonCandidates();
 
     for (const [pythonCmd, pythonCmdArgs] of pythonCandidates) {
       try {
-        await spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs);
+        await spawnBackendProcess(pythonCmd, [...pythonCmdArgs, ...backendArgs], projectRoot);
         resolve(true);
         return;
       } catch (error) {
         if (error && error.code === 'ENOENT') {
-          // Try next candidate.
           // eslint-disable-next-line no-continue
           continue;
         }
@@ -165,7 +201,6 @@ function createWindow() {
   });
 
   if (isPackaged) {
-  
     win.loadFile(path.join(__dirname, '../build/index.html'));
   } else {
     win.loadURL(process.env.ELECTRON_START_URL || 'http://localhost:3000');
