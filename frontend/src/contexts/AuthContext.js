@@ -22,7 +22,11 @@ export const AuthProvider = ({ children }) => {
       const response = await axios.get(`${API_URL}/api/auth/me`, {
         withCredentials: true
       });
-      setUser(response.data);
+      if (response.data?.authenticated) {
+        setUser(response.data);
+      } else {
+        setUser(false);
+      }
     } catch (error) {
       setUser(false);
     } finally {
@@ -40,6 +44,11 @@ export const AuthProvider = ({ children }) => {
       { email, password, remember_me: rememberMe },
       { withCredentials: true }
     );
+
+    if (!response.data?.authenticated) {
+      throw new Error(response.data?.detail || 'Credenciales inválidas');
+    }
+
     setUser(response.data);
     return response.data;
   };

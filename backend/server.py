@@ -125,10 +125,11 @@ def health() -> Dict[str, str]:
 @app.post("/api/auth/login")
 def login(payload: LoginPayload, response: Response) -> Dict[str, Any]:
     if payload.email != ADMIN_EMAIL or payload.password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+        response.delete_cookie("session_id")
+        return {"authenticated": False, "detail": "Credenciales inválidas"}
 
     session_id = secrets.token_urlsafe(32)
-    user = {"id": "admin", "email": ADMIN_EMAIL, "name": "Administrador"}
+    user = {"id": "admin", "email": ADMIN_EMAIL, "name": "Administrador", "authenticated": True}
     expiration = datetime.now(timezone.utc) + (timedelta(days=30) if payload.remember_me else timedelta(hours=8))
 
     SESSIONS[session_id] = {"user": user, "expires_at": expiration}
@@ -145,7 +146,9 @@ def login(payload: LoginPayload, response: Response) -> Dict[str, Any]:
 
 @app.get("/api/auth/me")
 def me(session_id: Optional[str] = Cookie(default=None)) -> Dict[str, Any]:
-    return _require_user(session_id)
+    if not session_id or session_id not in SESSIONS:
+        return {"authenticated": False}
+    return SESSIONS[session_id]["user"]
 
 
 @app.post("/api/auth/logout")
