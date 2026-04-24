@@ -60,6 +60,7 @@ yarn dist:win
 - Python 3 instalado en la máquina de build.
 - Permiso para instalar/usar `pyinstaller` (el script lo instala automáticamente con `pip`).
 - Si al ejecutar `server.exe` aparece `Unable to configure formatter 'default'` / `isatty`, vuelve a generar el exe con este código actualizado (`yarn dist:win`), ya que se corrigió el arranque en modo `--noconsole`.
+- Si `server.exe` abre/cierra y Electron muestra "Backend terminó con código 1", regenera con `yarn dist:win`; se corrigió el empaquetado para incluir explícitamente el módulo `server` en PyInstaller.
 
 ### Solución si aparece `spawn UNKNOWN` al generar NSIS
 

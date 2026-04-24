@@ -3,6 +3,8 @@ import sys
 
 import uvicorn
 
+import server
+
 
 class _NoConsoleStream:
     def write(self, _text: str) -> int:
@@ -33,7 +35,7 @@ if __name__ == "__main__":
     port = int(os.getenv("BACKEND_PORT", "8000"))
 
     uvicorn.run(
-        "server:app",
+        server.app,
         host=host,
         port=port,
         log_config=None,

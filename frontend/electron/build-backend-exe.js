@@ -72,6 +72,8 @@ function buildWithPython(pythonCmd, pythonArgs) {
     '--noconsole',
     '--paths',
     backendDir,
+    '--hidden-import',
+    'server',
     entryPoint,
   ]);
 
