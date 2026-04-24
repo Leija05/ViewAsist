@@ -29,7 +29,7 @@ function appendBackendStderr(chunk) {
 function getBackendStartupHelp() {
   if (!backendExitInfo) {
     if (isPackaged) {
-      return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que server.exe exista en resources/backend/dist y vuelve a instalar la app.`;
+      return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que server.exe exista en resources/backend y vuelve a instalar la app.`;
     }
     return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que Python y las dependencias del backend estén instaladas y vuelve a intentar.`;
   }
@@ -69,9 +69,9 @@ function getPythonCandidates() {
 
 function getPackagedBackendCandidates() {
   return [
+    path.join(packagedBackendRoot, 'server.exe'),
     path.join(packagedBackendRoot, 'dist', 'server.exe'),
     path.join(packagedBackendRoot, 'dist', 'server'),
-    path.join(packagedBackendRoot, 'server.exe'),
   ];
 }
 

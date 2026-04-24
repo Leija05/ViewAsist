@@ -52,7 +52,7 @@ yarn dist:win
 
 1. Ejecuta `build:backend:exe`.
 2. Genera `backend/dist/server.exe` con **PyInstaller** usando `backend/run_server.py`.
-3. Empaqueta Electron e incluye `server.exe` dentro de `resources/backend/dist` del instalador.
+3. Empaqueta Electron e incluye **solo** `server.exe` dentro de `resources/backend` del instalador (no copia toda la carpeta `backend/dist`).
 4. Al abrir la app instalada, Electron inicia `server.exe` automáticamente y apunta al puerto `8000`.
 
 ### Requisitos para empaquetar
