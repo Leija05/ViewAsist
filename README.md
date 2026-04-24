@@ -60,6 +60,11 @@ yarn dist:win
 - Python 3 instalado en la máquina de build.
 - Permiso para instalar/usar `pyinstaller` (el script lo instala automáticamente con `pip`).
 
+### Solución si aparece `spawn UNKNOWN` al generar NSIS
+
+Si al ejecutar `yarn dist:win` aparece `spawn UNKNOWN`, normalmente es un problema del toolchain de empaquetado/firmado de NSIS en Windows. En esta configuración se desactiva la firma del desinstalador y edición del ejecutable para evitar ese fallo en entornos sin firma de código.
+
+
 ## Credenciales por defecto
 
 - Email: `admin@empresa.com`
