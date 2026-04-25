@@ -20,7 +20,10 @@ import traceback
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
-from backend.local_db import LocalJsonDatabase
+try:
+    from backend.local_db import LocalJsonDatabase
+except ModuleNotFoundError:
+    from local_db import LocalJsonDatabase
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
