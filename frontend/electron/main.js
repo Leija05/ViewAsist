@@ -7,6 +7,7 @@ const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
 const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8000);
 const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const projectRoot = path.resolve(__dirname, '..', '..');
+const backendDataDir = app.getPath('userData');
 
 const isPackaged = app.isPackaged;
 let backendProcess = null;
@@ -26,7 +27,7 @@ function appendBackendStderr(chunk) {
 
 function getBackendStartupHelp() {
   if (!backendExitInfo) {
-    return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que MongoDB esté disponible y vuelve a intentar.`;
+    return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nRevisa el log del backend y vuelve a intentar.`;
   }
 
   const moduleMissingLine = backendStderrBuffer.find((line) => line.includes('ModuleNotFoundError:'));
@@ -87,17 +88,30 @@ async function waitForBackend(maxAttempts = 40, delayMs = 500) {
   return false;
 }
 
-async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
+
+function getBackendExecutablePath() {
+  if (!isPackaged) {
+    return null;
+  }
+
+  return path.join(process.resourcesPath, 'backend', 'server.exe');
+}
+
+function getBackendArgsForPython() {
+  return ['-m', 'uvicorn', 'backend.server:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)];
+}
+
+async function spawnBackendProcess(command, commandArgs) {
   backendExitInfo = null;
   backendStderrBuffer.length = 0;
 
-  const child = spawn(pythonCmd, [...pythonCmdArgs, ...backendArgs], {
-    cwd: projectRoot,
+  const child = spawn(command, commandArgs, {
+    cwd: isPackaged ? process.resourcesPath : projectRoot,
     env: {
       ...process.env,
-      MONGO_URL: process.env.MONGO_URL || 'mongodb://127.0.0.1:27017',
-      DB_NAME: process.env.DB_NAME || 'viewasist',
       FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+      VIEWASIST_DATA_DIR: process.env.VIEWASIST_DATA_DIR || backendDataDir,
+      VIEWASIST_DB_FILE: process.env.VIEWASIST_DB_FILE || path.join(backendDataDir, 'viewasist_db.json'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -129,18 +143,28 @@ function startBackendIfNeeded() {
       return;
     }
 
-    const backendArgs = ['-m', 'uvicorn', 'backend.server:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)];
+    if (isPackaged) {
+      const backendExe = getBackendExecutablePath();
+      try {
+        await spawnBackendProcess(backendExe, []);
+        resolve(true);
+        return;
+      } catch (error) {
+        reject(new Error(`No se pudo iniciar el backend empaquetado (${backendExe}): ${error.message || error}`));
+        return;
+      }
+    }
+
+    const backendArgs = getBackendArgsForPython();
     const pythonCandidates = getPythonCandidates();
 
     for (const [pythonCmd, pythonCmdArgs] of pythonCandidates) {
       try {
-        await spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs);
+        await spawnBackendProcess(pythonCmd, [...pythonCmdArgs, ...backendArgs]);
         resolve(true);
         return;
       } catch (error) {
         if (error && error.code === 'ENOENT') {
-          // Try next candidate.
-          // eslint-disable-next-line no-continue
           continue;
         }
         reject(error);
