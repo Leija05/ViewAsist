@@ -4,6 +4,13 @@ import axios from 'axios';
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8000';
 
 const AuthContext = createContext(null);
+const ACCESS_TOKEN_KEY = 'viewasist_access_token';
+
+const getStoredToken = () => localStorage.getItem(ACCESS_TOKEN_KEY) || '';
+const setStoredToken = (token) => {
+  if (token) localStorage.setItem(ACCESS_TOKEN_KEY, token);
+  else localStorage.removeItem(ACCESS_TOKEN_KEY);
+};
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
@@ -19,11 +26,16 @@ export const AuthProvider = ({ children }) => {
 
   const checkAuth = useCallback(async () => {
     try {
+      const token = getStoredToken();
       const response = await axios.get(`${API_URL}/api/auth/me`, {
-        withCredentials: true
+        withCredentials: true,
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       setUser(response.data);
     } catch (error) {
+      if (error?.response?.status === 401) {
+        setStoredToken('');
+      }
       setUser(false);
     } finally {
       setLoading(false);
@@ -40,16 +52,28 @@ export const AuthProvider = ({ children }) => {
       { email, password, remember_me: rememberMe },
       { withCredentials: true }
     );
-    setUser(response.data);
+    const accessToken = response.data?.access_token || '';
+    setStoredToken(accessToken);
+    setUser({
+      id: response.data.id,
+      email: response.data.email,
+      name: response.data.name,
+      role: response.data.role
+    });
     return response.data;
   };
 
   const logout = async () => {
     try {
-      await axios.post(`${API_URL}/api/auth/logout`, {}, { withCredentials: true });
+      const token = getStoredToken();
+      await axios.post(`${API_URL}/api/auth/logout`, {}, {
+        withCredentials: true,
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
     } catch (error) {
       // Ignore error
     }
+    setStoredToken('');
     setUser(false);
   };
 

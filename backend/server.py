@@ -352,7 +352,10 @@ async def login(request: LoginRequest, response: Response):
         "id": user_id,
         "email": user["email"],
         "name": user["name"],
-        "role": user["role"]
+        "role": user["role"],
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
     }
 
 @api_router.post("/auth/logout")
@@ -393,7 +396,7 @@ async def refresh_token(request: Request, response: Response):
             path="/"
         )
         
-        return {"message": "Token refrescado"}
+        return {"message": "Token refrescado", "access_token": new_access_token, "token_type": "bearer"}
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token de refresh expirado")
     except jwt.InvalidTokenError:
