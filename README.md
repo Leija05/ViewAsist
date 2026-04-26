@@ -2,7 +2,7 @@
 
 Sistema de control de asistencia con:
 
-- Backend FastAPI + MongoDB para autenticación, reportes y sincronización con reloj checador.
+- Backend FastAPI con base local JSON (sin MongoDB) para autenticación, reportes y sincronización con reloj checador.
 - Frontend React para dashboard, reglas de asistencia, configuración del reloj y generación de reportes.
 - Setup con Electron para operar la app como escritorio.
 
@@ -48,16 +48,15 @@ yarn dev:electron
 Al abrir Electron, ahora la app intenta:
 
 1. Levantar automáticamente el backend FastAPI (`backend.server:app`).
-2. Conectarse a MongoDB usando por defecto `MONGO_URL=mongodb://127.0.0.1:27017`.
+2. Persistir datos en `viewasist_db.json` dentro del directorio de datos del usuario.
 3. Esperar a que la API responda en `http://127.0.0.1:8000` antes de abrir la ventana.
 
 Si quieres personalizar rutas/puertos:
 
 ```bash
-MONGO_URL=mongodb://127.0.0.1:27017 \
-DB_NAME=viewasist \
 BACKEND_HOST=127.0.0.1 \
 BACKEND_PORT=8000 \
+VIEWASIST_DATA_DIR=./backend/data \
 ELECTRON_PYTHON_PATH=python3 \
 yarn dev:electron
 ```
@@ -68,7 +67,8 @@ Comandos relevantes:
 - `yarn dev:electron` → frontend + Electron para entorno local.
 - `yarn electron` → abre Electron contra build estático (`frontend/build`).
 - `yarn dist` → genera instaladores/artefactos de escritorio con `electron-builder`.
-- `yarn dist:win` → genera instalador `.exe` (NSIS) en `frontend/dist/`.
+- `yarn build:backend:exe` → compila `backend/dist/server.exe` con PyInstaller.
+- `yarn dist:win` → compila backend + frontend y genera instalador `.exe` (NSIS) en `frontend/dist/`.
 
 ## Dependencia del reloj
 

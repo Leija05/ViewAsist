@@ -5,8 +5,6 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
-from motor.motor_asyncio import AsyncIOMotorClient
-from bson import ObjectId
 import os
 import logging
 import asyncio
@@ -22,6 +20,10 @@ import traceback
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
+try:
+    from backend.local_db import LocalJsonDatabase
+except ModuleNotFoundError:
+    from local_db import LocalJsonDatabase
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone, timedelta
@@ -35,18 +37,17 @@ socket.setdefaulttimeout(10)
 
 
 ROOT_DIR = Path(__file__).parent
+DATA_DIR = Path(os.environ.get("VIEWASIST_DATA_DIR", ROOT_DIR / "data"))
+DB_FILE = Path(os.environ.get("VIEWASIST_DB_FILE", DATA_DIR / "viewasist_db.json"))
+db = LocalJsonDatabase(DB_FILE)
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
 
 # JWT Configuration
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days for persistent session
 
 def get_jwt_secret() -> str:
-    return os.environ["JWT_SECRET"]
+    return os.environ.get("JWT_SECRET", "viewasist-local-secret-change-me")
 
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
@@ -178,7 +179,7 @@ async def get_current_user(request: Request) -> dict:
         payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Tipo de token inválido")
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        user = await db.users.find_one({"_id": payload["sub"]})
         if not user:
             raise HTTPException(status_code=401, detail="Usuario no encontrado")
         user["_id"] = str(user["_id"])
@@ -351,7 +352,10 @@ async def login(request: LoginRequest, response: Response):
         "id": user_id,
         "email": user["email"],
         "name": user["name"],
-        "role": user["role"]
+        "role": user["role"],
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
     }
 
 @api_router.post("/auth/logout")
@@ -376,7 +380,7 @@ async def refresh_token(request: Request, response: Response):
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Tipo de token inválido")
         
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        user = await db.users.find_one({"_id": payload["sub"]})
         if not user:
             raise HTTPException(status_code=401, detail="Usuario no encontrado")
         
@@ -392,7 +396,7 @@ async def refresh_token(request: Request, response: Response):
             path="/"
         )
         
-        return {"message": "Token refrescado"}
+        return {"message": "Token refrescado", "access_token": new_access_token, "token_type": "bearer"}
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token de refresh expirado")
     except jwt.InvalidTokenError:
@@ -585,7 +589,7 @@ async def get_reports(request: Request):
 async def get_report(report_id: str, request: Request):
     await get_current_user(request)
     try:
-        report = await db.reports.find_one({"_id": ObjectId(report_id)}, {"raw_content": 0})
+        report = await db.reports.find_one({"_id": report_id}, {"raw_content": 0})
         if not report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         report["_id"] = str(report["_id"])
@@ -599,7 +603,7 @@ async def get_report(report_id: str, request: Request):
 async def get_excel_preview(report_id: str, request: Request):
     await get_current_user(request)
     try:
-        report = await db.reports.find_one({"_id": ObjectId(report_id)})
+        report = await db.reports.find_one({"_id": report_id})
         if not report or "raw_content" not in report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         
@@ -626,7 +630,7 @@ async def get_excel_preview(report_id: str, request: Request):
 async def delete_report(report_id: str, request: Request):
     await get_current_user(request)
     try:
-        result = await db.reports.delete_one({"_id": ObjectId(report_id)})
+        result = await db.reports.delete_one({"_id": report_id})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         return {"message": "Reporte eliminado"}
@@ -721,7 +725,7 @@ async def export_pdf(report_id: str, request: Request):
     await get_current_user(request)
     
     try:
-        report = await db.reports.find_one({"_id": ObjectId(report_id)}, {"raw_content": 0})
+        report = await db.reports.find_one({"_id": report_id}, {"raw_content": 0})
         if not report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         
@@ -2226,4 +2230,4 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    return None
