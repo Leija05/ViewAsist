@@ -33,14 +33,14 @@ function resolveBackendExecutablePath() {
     if (isDev) {
         return path.join(__dirname, '../resources/viewasist-server.exe');
     }
-    return path.join(process.resourcesPath, 'resources', 'viewasist-server.exe');
+    return path.join(process.resourcesPath, 'viewasist-server.exe');
 }
 
 function startBackend() {
     const backendExecutablePath = resolveBackendExecutablePath();
 
     if (!fs.existsSync(backendExecutablePath)) {
-        backendStartupIssue = `No existe cruces-server.exe en: ${backendExecutablePath}`;
+        backendStartupIssue = `No existe viewasist-server.exe en: ${backendExecutablePath}`;
         return;
     }
 
@@ -165,7 +165,7 @@ app.whenReady().then(async () => {
     createWindow();
 
     if (!ready) {
-        const portBusy = await inspectPort(8001);
+        const portBusy = await inspectPort(8000);
         const diagnostics = [
             backendStartupIssue,
             ...backendLogs.slice(-8),
@@ -175,7 +175,7 @@ app.whenReady().then(async () => {
         dialog.showMessageBox({
             type: 'warning',
             title: 'Servidor no disponible',
-            message: 'El servidor de cruces no respondió a tiempo.',
+            message: 'El servidor de ViewAsist no respondió a tiempo.',
             detail: diagnostics || 'No se pudo iniciar el backend. Revisa el ejecutable de servidor.',
             buttons: ['Aceptar'],
         });

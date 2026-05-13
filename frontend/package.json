@@ -122,17 +122,20 @@
     ],
     "extraResources": [
       {
-        "from": "../backend",
-        "to": "backend",
+        "from": "../backend/dist/viewasist-server.exe",
+        "to": "viewasist-server.exe"
+      },
+      {
+        "from": "../backend/.env",
+        "to": "backend.env",
         "filter": [
-          "**/*"
+          ".env"
         ]
       }
     ],
     "win": {
-      "target": [
-        "nsis"
-      ]
+      "target": "nsis",
+      "icon": "assets/icon.ico"
     },
     "publish": [
       {
@@ -141,10 +144,6 @@
         "repo": "AiewAsist"
       }
     ],
-    "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
-    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true

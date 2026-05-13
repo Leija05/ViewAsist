@@ -2,7 +2,7 @@
 
 Sistema de control de asistencia con:
 
-- Backend FastAPI + MongoDB para autenticación, reportes y sincronización con reloj checador.
+- Backend FastAPI en modo local para autenticación, reportes y sincronización con reloj checador.
 - Frontend React para dashboard, reglas de asistencia, configuración del reloj y generación de reportes.
 - Setup con Electron para operar la app como escritorio.
 
@@ -48,14 +48,11 @@ yarn dev:electron
 Al abrir Electron, ahora la app intenta:
 
 1. Levantar automáticamente el backend FastAPI (`backend.server:app`).
-2. Conectarse a MongoDB usando por defecto `MONGO_URL=mongodb://127.0.0.1:27017`.
-3. Esperar a que la API responda en `http://127.0.0.1:8000` antes de abrir la ventana.
+2. Esperar a que la API responda en `http://127.0.0.1:8000` antes de abrir la ventana.
 
 Si quieres personalizar rutas/puertos:
 
 ```bash
-MONGO_URL=mongodb://127.0.0.1:27017 \
-DB_NAME=viewasist \
 BACKEND_HOST=127.0.0.1 \
 BACKEND_PORT=8000 \
 ELECTRON_PYTHON_PATH=python3 \
