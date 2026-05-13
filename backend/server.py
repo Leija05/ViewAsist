@@ -203,3 +203,9 @@ async def export_reports(request: Request):
 async def health(): return {"status":"ok","storage":"local-json"}
 
 app.include_router(api)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("server:app", host="0.0.0.0", port=8000)
