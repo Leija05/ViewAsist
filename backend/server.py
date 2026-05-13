@@ -208,4 +208,7 @@ app.include_router(api)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("server:app", host="0.0.0.0", port=8000)
+    import os
+    host = os.environ.get("BACKEND_HOST", "0.0.0.0")
+    port = int(os.environ.get("BACKEND_PORT", "8000"))
+    uvicorn.run("server:app", host=host, port=port)
