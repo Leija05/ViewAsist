@@ -5,8 +5,6 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
-from motor.motor_asyncio import AsyncIOMotorClient
-from bson import ObjectId
 import os
 import logging
 import asyncio
@@ -37,6 +35,130 @@ socket.setdefaulttimeout(10)
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+
+from uuid import uuid4
+
+class LocalInsertResult:
+    def __init__(self, inserted_id):
+        self.inserted_id = inserted_id
+
+class LocalUpdateResult:
+    def __init__(self, matched_count=0):
+        self.matched_count = matched_count
+
+class LocalDeleteResult:
+    def __init__(self, deleted_count=0):
+        self.deleted_count = deleted_count
+
+class LocalCursor:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def sort(self, key, direction):
+        reverse = direction == -1
+        self.docs = sorted(self.docs, key=lambda d: d.get(key), reverse=reverse)
+        return self
+
+    async def to_list(self, limit):
+        return self.docs[:limit]
+
+def _matches(doc, query):
+    for k, v in (query or {}).items():
+        if isinstance(v, dict) and '$in' in v:
+            if doc.get(k) not in v['$in']:
+                return False
+        elif doc.get(k) != v:
+            return False
+    return True
+
+def _project(doc, projection):
+    if not projection:
+        return dict(doc)
+    include = {k for k, val in projection.items() if val}
+    exclude = {k for k, val in projection.items() if not val}
+    if include:
+        return {k: doc.get(k) for k in include if k in doc}
+    out = dict(doc)
+    for k in exclude:
+        out.pop(k, None)
+    return out
+
+class LocalCollection:
+    def __init__(self, db, name):
+        self.db = db
+        self.name = name
+
+    def _docs(self):
+        return self.db.data.setdefault(self.name, [])
+
+    async def find_one(self, query=None, projection=None, sort=None):
+        docs = [d for d in self._docs() if _matches(d, query or {})]
+        if sort:
+            key, direction = sort[0]
+            docs = sorted(docs, key=lambda d: d.get(key), reverse=(direction == -1))
+        return _project(docs[0], projection) if docs else None
+
+    async def insert_one(self, doc):
+        item = dict(doc)
+        item.setdefault('_id', uuid4().hex)
+        self._docs().append(item)
+        self.db.save()
+        return LocalInsertResult(item['_id'])
+
+    async def update_one(self, query, update, upsert=False):
+        for d in self._docs():
+            if _matches(d, query):
+                if '$set' in update:
+                    d.update(update['$set'])
+                self.db.save()
+                return LocalUpdateResult(1)
+        if upsert:
+            base = dict(query)
+            base.update(update.get('$set', {}))
+            await self.insert_one(base)
+            return LocalUpdateResult(1)
+        return LocalUpdateResult(0)
+
+    async def delete_one(self, query):
+        docs = self._docs()
+        for i,d in enumerate(docs):
+            if _matches(d, query):
+                docs.pop(i)
+                self.db.save()
+                return LocalDeleteResult(1)
+        return LocalDeleteResult(0)
+
+    def find(self, query=None, projection=None):
+        docs = [_project(d, projection) for d in self._docs() if _matches(d, query or {})]
+        return LocalCursor(docs)
+
+    async def count_documents(self, query):
+        return len([d for d in self._docs() if _matches(d, query or {})])
+
+    async def create_index(self, *args, **kwargs):
+        return None
+
+class LocalDatabase:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            self.data = json.loads(self.path.read_text(encoding='utf-8'))
+        else:
+            self.data = {}
+
+    def __getattr__(self, name):
+        return LocalCollection(self, name)
+
+    def save(self):
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, default=str), encoding='utf-8')
+
+class LocalClient:
+    def close(self):
+        return None
+
+client = LocalClient()
+db = LocalDatabase(ROOT_DIR / 'data' / 'local_db.json')
 
 
 # JWT Configuration
@@ -176,7 +298,7 @@ async def get_current_user(request: Request) -> dict:
         payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Tipo de token inválido")
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        user = await db.users.find_one({"_id": payload["sub"]})
         if not user:
             raise HTTPException(status_code=401, detail="Usuario no encontrado")
         user["_id"] = str(user["_id"])
@@ -374,7 +496,7 @@ async def refresh_token(request: Request, response: Response):
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Tipo de token inválido")
         
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        user = await db.users.find_one({"_id": payload["sub"]})
         if not user:
             raise HTTPException(status_code=401, detail="Usuario no encontrado")
         
@@ -583,7 +705,7 @@ async def get_reports(request: Request):
 async def get_report(report_id: str, request: Request):
     await get_current_user(request)
     try:
-        report = await db.reports.find_one({"_id": ObjectId(report_id)}, {"raw_content": 0})
+        report = await db.reports.find_one({"_id": report_id}, {"raw_content": 0})
         if not report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         report["_id"] = str(report["_id"])
@@ -597,7 +719,7 @@ async def get_report(report_id: str, request: Request):
 async def get_excel_preview(report_id: str, request: Request):
     await get_current_user(request)
     try:
-        report = await db.reports.find_one({"_id": ObjectId(report_id)})
+        report = await db.reports.find_one({"_id": report_id})
         if not report or "raw_content" not in report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         
@@ -624,7 +746,7 @@ async def get_excel_preview(report_id: str, request: Request):
 async def delete_report(report_id: str, request: Request):
     await get_current_user(request)
     try:
-        result = await db.reports.delete_one({"_id": ObjectId(report_id)})
+        result = await db.reports.delete_one({"_id": report_id})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         return {"message": "Reporte eliminado"}
@@ -719,7 +841,7 @@ async def export_pdf(report_id: str, request: Request):
     await get_current_user(request)
     
     try:
-        report = await db.reports.find_one({"_id": ObjectId(report_id)}, {"raw_content": 0})
+        report = await db.reports.find_one({"_id": report_id}, {"raw_content": 0})
         if not report:
             raise HTTPException(status_code=404, detail="Reporte no encontrado")
         

@@ -2,7 +2,7 @@
 
 Sistema de control de asistencia con:
 
-- Backend FastAPI en modo local para autenticación, reportes y sincronización con reloj checador.
+- Backend FastAPI en modo local para autenticación, reportes y sincronización con reloj checador (persistencia en archivo `backend/data/local_db.json`).
 - Frontend React para dashboard, reglas de asistencia, configuración del reloj y generación de reportes.
 - Setup con Electron para operar la app como escritorio.
 
