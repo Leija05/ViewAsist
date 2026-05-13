@@ -68,8 +68,9 @@
     "test": "craco test",
     "electron": "electron ./electron/main.js",
     "dev:electron": "concurrently -k \"cross-env BROWSER=none REACT_APP_BACKEND_URL=http://localhost:8000 craco start\" \"wait-on http://localhost:3000 && cross-env ELECTRON_START_URL=http://localhost:3000 BACKEND_HOST=localhost electron ./electron/main.js\"",
-    "dist": "yarn build && electron-builder",
-    "dist:win": "yarn build && electron-builder --win nsis"
+    "dist": "yarn build && yarn build:backend && electron-builder",
+    "dist:win": "yarn build && yarn build:backend && electron-builder --win nsis",
+    "build:backend": "node ./scripts_build_backend.js"
   },
   "browserslist": {
     "production": [
@@ -127,12 +128,18 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "electron/backend-dist",
+        "to": "backend-dist",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
-      "target": [
-        "nsis"
-      ]
+      "target": "nsis",
+      "icon": "assets/icon.ico"
     },
     "publish": [
       {
@@ -141,10 +148,6 @@
         "repo": "AiewAsist"
       }
     ],
-    "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
-    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true

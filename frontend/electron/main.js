@@ -9,6 +9,7 @@ const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const projectRoot = path.resolve(__dirname, '..', '..');
 
 const isPackaged = app.isPackaged;
+const bundledBackendExe = isPackaged ? path.join(process.resourcesPath, 'backend-dist', 'viewasist-backend.exe') : null;
 let backendProcess = null;
 let backendExitInfo = null;
 const backendStderrBuffer = [];
@@ -121,12 +122,54 @@ async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
   return child;
 }
 
+
+async function spawnBundledBackendExe(exePath) {
+  backendExitInfo = null;
+  backendStderrBuffer.length = 0;
+
+  const child = spawn(exePath, [], {
+    cwd: path.dirname(exePath),
+    env: {
+      ...process.env,
+      BACKEND_HOST,
+      BACKEND_PORT: String(BACKEND_PORT),
+      MONGO_URL: process.env.MONGO_URL || 'mongodb://127.0.0.1:27017',
+      DB_NAME: process.env.DB_NAME || 'viewasist',
+      FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+
+  if (child.stdout) child.stdout.on('data', (chunk) => process.stdout.write(chunk.toString()));
+  if (child.stderr) child.stderr.on('data', appendBackendStderr);
+  child.on('exit', (code, signal) => {
+    backendExitInfo = { code, signal };
+  });
+
+  backendProcess = child;
+}
+
 function startBackendIfNeeded() {
   return new Promise(async (resolve, reject) => {
     const alreadyRunning = await isBackendHealthy();
     if (alreadyRunning) {
       resolve(false);
       return;
+    }
+
+    if (isPackaged && bundledBackendExe) {
+      try {
+        await spawnBundledBackendExe(bundledBackendExe);
+        resolve(true);
+        return;
+      } catch (error) {
+        process.stderr.write(`[backend] No se pudo iniciar .exe empaquetado: ${error}\n`);
+      }
     }
 
     const backendArgs = ['-m', 'uvicorn', 'backend.server:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)];
