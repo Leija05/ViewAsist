@@ -1,207 +1,195 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, Menu, ipcMain, nativeImage } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const net = require('net');
 const { spawn } = require('child_process');
-const http = require('http');
 
-const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
-const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8000);
-const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
-const projectRoot = path.resolve(__dirname, '..', '..');
-
-const isPackaged = app.isPackaged;
+const isDev = !app.isPackaged;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const ICON_FILENAME = 'icon.ico';
 let backendProcess = null;
-let backendExitInfo = null;
-const backendStderrBuffer = [];
+let backendStartupIssue = '';
+let backendLogs = [];
 
-function appendBackendStderr(chunk) {
-  const text = chunk.toString();
-  process.stderr.write(text);
-
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  backendStderrBuffer.push(...lines);
-  if (backendStderrBuffer.length > 60) {
-    backendStderrBuffer.splice(0, backendStderrBuffer.length - 60);
-  }
-}
-
-function getBackendStartupHelp() {
-  if (!backendExitInfo) {
-    return `No se pudo iniciar/alcanzar el backend en ${BACKEND_URL}.\n\nVerifica que MongoDB esté disponible y vuelve a intentar.`;
-  }
-
-  const moduleMissingLine = backendStderrBuffer.find((line) => line.includes('ModuleNotFoundError:'));
-  const missingModuleMatch = moduleMissingLine && moduleMissingLine.match(/No module named '([^']+)'/);
-
-  const processSummary = backendExitInfo.signal
-    ? `El backend terminó por señal ${backendExitInfo.signal}.`
-    : `El backend terminó con código ${backendExitInfo.code}.`;
-
-  if (missingModuleMatch) {
-    return `${processSummary}\n\nFalta el módulo de Python "${missingModuleMatch[1]}".\nInstala dependencias del backend (por ejemplo: pip install -r backend/requirements.txt) y vuelve a intentar.`;
-  }
-
-  return `${processSummary}\n\nRevisa la consola para ver el traceback completo del backend y vuelve a intentar.`;
-}
-
-function getPythonCandidates() {
-  if (process.env.ELECTRON_PYTHON_PATH) {
-    return [[process.env.ELECTRON_PYTHON_PATH, []]];
-  }
-
-  if (process.platform === 'win32') {
-    return [
-      ['py', ['-3']],
-      ['python', []],
-      ['python3', []],
+function resolveAppIconPath() {
+    const candidatePaths = [
+        path.join(__dirname, '../assets', ICON_FILENAME),
+        path.join(process.resourcesPath || '', 'assets', ICON_FILENAME),
+        path.join(process.resourcesPath || '', 'app.asar', 'assets', ICON_FILENAME),
+        path.join(__dirname, '../build', ICON_FILENAME),
     ];
-  }
 
-  return [
-    ['python3', []],
-    ['python', []],
-  ];
+    return candidatePaths.find((candidatePath) => candidatePath && fs.existsSync(candidatePath)) || null;
 }
 
-function isBackendHealthy(timeoutMs = 1500) {
-  return new Promise((resolve) => {
-    const req = http.get(`${BACKEND_URL}/api/`, { timeout: timeoutMs }, (res) => {
-      resolve(res.statusCode >= 200 && res.statusCode < 500);
-      res.resume();
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(false);
-    });
-  });
+function appendBackendLog(message) {
+    backendLogs.push(message);
+    if (backendLogs.length > 25) {
+        backendLogs = backendLogs.slice(-25);
+    }
 }
 
-async function waitForBackend(maxAttempts = 40, delayMs = 500) {
-  for (let i = 0; i < maxAttempts; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    const ok = await isBackendHealthy();
-    if (ok) return true;
-    // eslint-disable-next-line no-await-in-loop
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-  return false;
+function resolveBackendExecutablePath() {
+    if (isDev) {
+        return path.join(__dirname, '../resources/viewasist-server.exe');
+    }
+    return path.join(process.resourcesPath, 'resources', 'viewasist-server.exe');
 }
 
-async function spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs) {
-  backendExitInfo = null;
-  backendStderrBuffer.length = 0;
+function startBackend() {
+    const backendExecutablePath = resolveBackendExecutablePath();
 
-  const child = spawn(pythonCmd, [...pythonCmdArgs, ...backendArgs], {
-    cwd: projectRoot,
-    env: {
-      ...process.env,
-      MONGO_URL: process.env.MONGO_URL || 'mongodb://127.0.0.1:27017',
-      DB_NAME: process.env.DB_NAME || 'viewasist',
-      FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  await new Promise((resolve, reject) => {
-    child.once('spawn', resolve);
-    child.once('error', reject);
-  });
-
-  if (child.stdout) {
-    child.stdout.on('data', (chunk) => process.stdout.write(chunk.toString()));
-  }
-  if (child.stderr) {
-    child.stderr.on('data', appendBackendStderr);
-  }
-  child.on('exit', (code, signal) => {
-    backendExitInfo = { code, signal };
-  });
-
-  backendProcess = child;
-  return child;
-}
-
-function startBackendIfNeeded() {
-  return new Promise(async (resolve, reject) => {
-    const alreadyRunning = await isBackendHealthy();
-    if (alreadyRunning) {
-      resolve(false);
-      return;
+    if (!fs.existsSync(backendExecutablePath)) {
+        backendStartupIssue = `No existe cruces-server.exe en: ${backendExecutablePath}`;
+        return;
     }
 
-    const backendArgs = ['-m', 'uvicorn', 'backend.server:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)];
-    const pythonCandidates = getPythonCandidates();
+    appendBackendLog(`Iniciando backend desde: ${backendExecutablePath}`);
 
-    for (const [pythonCmd, pythonCmdArgs] of pythonCandidates) {
-      try {
-        await spawnBackendProcess(pythonCmd, pythonCmdArgs, backendArgs);
-        resolve(true);
-        return;
-      } catch (error) {
-        if (error && error.code === 'ENOENT') {
-          // Try next candidate.
-          // eslint-disable-next-line no-continue
-          continue;
-        }
-        reject(error);
-        return;
-      }
-    }
+    backendProcess = spawn(backendExecutablePath, [], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        cwd: path.dirname(backendExecutablePath),
+        env: process.env,
+    });
 
-    const envVarHint = process.env.ELECTRON_PYTHON_PATH
-      ? `No se pudo ejecutar ELECTRON_PYTHON_PATH="${process.env.ELECTRON_PYTHON_PATH}".`
-      : 'No se encontró una instalación de Python (probado: py -3, python, python3).';
-    reject(new Error(`${envVarHint}\nInstala Python 3 y vuelve a intentar.`));
-  });
+    backendProcess.once('error', (error) => {
+        backendStartupIssue = `Error al iniciar viewasist-server.exe: ${error?.message || String(error)}`;
+        appendBackendLog(backendStartupIssue);
+    });
+
+    backendProcess.stdout?.on('data', (data) => {
+        appendBackendLog(`[stdout] ${String(data).trim()}`);
+    });
+    backendProcess.stderr?.on('data', (data) => {
+        appendBackendLog(`[stderr] ${String(data).trim()}`);
+    });
+    backendProcess.on('exit', (code, signal) => {
+        appendBackendLog(`Backend finalizó (code=${code}, signal=${signal || 'none'})`);
+    });
 }
 
+function inspectPort(port) {
+    return new Promise((resolve) => {
+        const socket = net.createConnection({ host: '127.0.0.1', port, timeout: 1000 }, () => {
+            socket.end();
+            resolve(true);
+        });
+
+        socket.on('error', () => resolve(false));
+        socket.on('timeout', () => {
+            socket.destroy();
+            resolve(false);
+        });
+    });
+}
+
+async function waitForBackendReady() {
+    const maxAttempts = 30;
+    const url = 'http://127.0.0.1:8000/api/health';
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+            const response = await fetch(url);
+            if (response.ok) return true;
+        } catch (_) { }
+
+        if (backendProcess && backendProcess.exitCode !== null) return false;
+        await sleep(1000);
+    }
+    return false;
+}
+function createDriverWindow() {
+    const driverWin = new BrowserWindow({
+        width: 1280,
+        height: 720,
+        autoHideMenuBar: true,
+        icon: resolveAppIconPath() || undefined,
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+        },
+
+    });
+
+    driverWin.removeMenu();
+
+    if (isDev) {
+        driverWin.loadURL('http://localhost:3000/');
+    } else {
+        const indexPath = path.join(__dirname, '../build/index.html');
+        driverWin.loadFile(indexPath, { hash: '/pantalla-chofer' });
+    }
+}
+
+ipcMain.on('open-driver-window', () => {
+    createDriverWindow();
+});
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
 
-  if (isPackaged) {
-  
-    win.loadFile(path.join(__dirname, '../build/index.html'));
-  } else {
-    win.loadURL(process.env.ELECTRON_START_URL || 'http://localhost:3000');
-  }
+    const mainWindow = new BrowserWindow({
+        width: 1440,
+        height: 900,
+        autoHideMenuBar: true,
+        icon: resolveAppIconPath() || undefined,
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+        },
+    });
+
+    mainWindow.removeMenu();
+
+    if (isDev) {
+        mainWindow.loadURL('http://localhost:3000');
+        mainWindow.webContents.openDevTools({ mode: 'detach' });
+    } else {
+        mainWindow.loadFile(path.join(__dirname, '../build/index.html'));
+    }
 }
 
-app.whenReady().then(() => {
-  (async () => {
-    try {
-      await startBackendIfNeeded();
-      const ready = await waitForBackend();
-      if (!ready) {
-        dialog.showErrorBox(
-          'Backend no disponible',
-          getBackendStartupHelp()
-        );
-      }
-      createWindow();
-      app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) createWindow();
-      });
-    } catch (error) {
-      dialog.showErrorBox('Error iniciando backend', String(error));
-      createWindow();
+app.whenReady().then(async () => {
+    app.setAppUserModelId('com.viewasist.app');
+    const iconPath = resolveAppIconPath();
+    if (fs.existsSync(iconPath)) {
+        const appIcon = nativeImage.createFromPath(iconPath);
+        if (!appIcon.isEmpty()) {
+            app.dock?.setIcon(appIcon);
+        }
     }
-  })();
+
+    Menu.setApplicationMenu(null);
+    startBackend();
+
+    const ready = await waitForBackendReady();
+    createWindow();
+
+    if (!ready) {
+        const portBusy = await inspectPort(8001);
+        const diagnostics = [
+            backendStartupIssue,
+            ...backendLogs.slice(-8),
+            `Puerto 8001 ${portBusy ? 'en uso por otro proceso' : 'sin respuesta'}.`,
+        ].filter(Boolean).join('\n');
+
+        dialog.showMessageBox({
+            type: 'warning',
+            title: 'Servidor no disponible',
+            message: 'El servidor de cruces no respondió a tiempo.',
+            detail: diagnostics || 'No se pudo iniciar el backend. Revisa el ejecutable de servidor.',
+            buttons: ['Aceptar'],
+        });
+    }
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+    if (process.platform !== 'darwin') {
+        app.quit();
+    }
 });
 
 app.on('before-quit', () => {
-  if (backendProcess && !backendProcess.killed) {
-    backendProcess.kill('SIGTERM');
-  }
+    if (backendProcess && !backendProcess.killed) {
+        backendProcess.kill();
+    }
 });
