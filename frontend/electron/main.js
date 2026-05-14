@@ -6,6 +6,9 @@ const { spawn } = require('child_process');
 
 const isDev = !app.isPackaged;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
+const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8000);
+const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const ICON_FILENAME = 'icon.ico';
 let backendProcess = null;
 let backendStartupIssue = '';
@@ -40,7 +43,7 @@ function startBackend() {
     const backendExecutablePath = resolveBackendExecutablePath();
 
     if (!fs.existsSync(backendExecutablePath)) {
-        backendStartupIssue = `No existe cruces-server.exe en: ${backendExecutablePath}`;
+        backendStartupIssue = `No existe viewasist-server.exe en: ${backendExecutablePath}`;
         return;
     }
 
@@ -86,7 +89,7 @@ function inspectPort(port) {
 
 async function waitForBackendReady() {
     const maxAttempts = 30;
-    const url = 'http://127.0.0.1:8000/api/health';
+    const url = `${BACKEND_BASE_URL}/api/health`;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
@@ -165,17 +168,17 @@ app.whenReady().then(async () => {
     createWindow();
 
     if (!ready) {
-        const portBusy = await inspectPort(8001);
+        const portBusy = await inspectPort(BACKEND_PORT);
         const diagnostics = [
             backendStartupIssue,
             ...backendLogs.slice(-8),
-            `Puerto 8001 ${portBusy ? 'en uso por otro proceso' : 'sin respuesta'}.`,
+            `Puerto ${BACKEND_PORT} ${portBusy ? 'en uso por otro proceso' : 'sin respuesta'}.`,
         ].filter(Boolean).join('\n');
 
         dialog.showMessageBox({
             type: 'warning',
             title: 'Servidor no disponible',
-            message: 'El servidor de cruces no respondió a tiempo.',
+            message: 'El servidor de ViewAsist no respondió a tiempo.',
             detail: diagnostics || 'No se pudo iniciar el backend. Revisa el ejecutable de servidor.',
             buttons: ['Aceptar'],
         });
