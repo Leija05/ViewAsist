@@ -208,11 +208,11 @@ app.include_router(api)
 if __name__ == "__main__":
     import os
     import sys
-    import uvicorn
-
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-    uvicorn.run("server:app", host="0.0.0.0", port=8000)
+    import uvicorn
+
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, log_config=None)
