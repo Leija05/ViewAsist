@@ -107,11 +107,14 @@
   "main": "electron/main.js",
   "build": {
     "extends": null,
-    "appId": "com.viewasist.desktop",
-    "productName": "ViewAsist",
-    "directories": {
-      "output": "dist"
-    },
+    "appId": "com.cruces.app",
+    "productName": "Gestion de Cruces",
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://example.com/downloads"
+      }
+    ],
     "extraMetadata": {
       "main": "electron/main.js"
     },
@@ -129,25 +132,25 @@
         ]
       }
     ],
-    "win": {
-      "target": [
-        "nsis"
-      ]
+    "directories": {
+      "output": "release"
     },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "Leija05",
-        "repo": "AiewAsist"
-      }
-    ],
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "packElevateHelper": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeader": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
     }
   }
 }
