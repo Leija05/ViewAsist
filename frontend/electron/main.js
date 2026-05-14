@@ -33,10 +33,13 @@ function appendBackendLog(message) {
 }
 
 function resolveBackendExecutablePath() {
-    if (isDev) {
-        return path.join(__dirname, '../resources/viewasist-server.exe');
-    }
-    return path.join(process.resourcesPath, 'resources', 'viewasist-server.exe');
+    const candidatePaths = [
+        path.join(__dirname, '../resources/viewasist-server.exe'),
+        path.join(process.resourcesPath || '', 'resources', 'viewasist-server.exe'),
+        path.join(process.resourcesPath || '', 'viewasist-server.exe'),
+    ];
+
+    return candidatePaths.find((candidatePath) => candidatePath && fs.existsSync(candidatePath)) || candidatePaths[0];
 }
 
 function startBackend() {
